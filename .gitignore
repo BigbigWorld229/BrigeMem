@@ -20,3 +20,12 @@ hpc/tmp*
 .hf_cache/
 __pycache__/
 *.pyc
+
+# Local HPC scripts/files
+/hpc/hpc_run.sh
+/hpc/memweave_qwen25_3b_locomo_driver.py
+/hpc/memweave_qwen25_3b_locomo_eval.py
+/hpc/memweave-qwen3-2507-locomo-fix-20260630.txt
+/hpc/memweave-qwen3-2507-locomo.sh
+/hpc/memweave-qwen25-locomo.sh
+/hpc/memweave-qwen35-locomo.sh
