@@ -1,0 +1,82 @@
+MemWeaveMine cost statistics cleanup record
+Date: 2026-08-03
+Entry audited: hpc/memweave-qwen3-2507-locomo.sh
+
+Scope
+-----
+The entry fixes MEMORY_BUILD_MODE=step1_prompt_only.  Its current evaluated
+LLM cost path is:
+
+  prestorage_step1_metadata
+  -> retrieval_keyword_query
+  -> qa_answer_generation
+
+The removed stages are not emitted on this path:
+  1. Step 1 A-Mem update/evolution
+  2. Step 2 Pre-Storage premem_step2_reasoning
+  3. Step 2 A-Mem update/evolution
+
+Modified files
+--------------
+1. cost_profiler.py
+   - Removed stage constants STAGE_AMEM_AFTER_STEP1, STAGE_PREMEM_STEP2 and
+     STAGE_AMEM_AFTER_STEP2.
+   - Reduced STAGES to Step 1, query rewrite and retrieval/answer.
+   - Removed the prestorage_step2_reasoning fallback mapping.
+   - Reduced MEMORY_BUILD_OPERATIONS and SUMMARY_OPERATIONS to the live
+     prestorage_step1_metadata operation.  Removed legacy memory_metadata,
+     premem Step 2 and A-Mem evolution operation names from these aggregates.
+   - Removed UPDATE_OPERATIONS, the update_stage aggregation,
+     lightmem_style.update_tokens, lightmem_style.update_tokens_k and
+     llm.update_stage.
+   - Reduced MEMORY_BUILD_STAGES to Step 1.  Therefore each incremental
+     conversation memory-build cost summary only lists the actual Step 1
+     stage.
+
+2. hpc/memweave_qwen25_3b_locomo_driver.py
+   - Removed the terminal logger's update=... placeholder and its read of
+     lightmem_style.update_tokens_k.  This is required because that removed
+     A-Mem-only cost field would otherwise cause a KeyError after evaluation.
+   - No result payload, prompt, dataset, result JSON field or incremental
+     writer code was changed.
+
+Retained behavior and statistics
+--------------------------------
+- Step 1 prompt extraction remains represented by summary_tokens* and
+  memory_build_total_tokens*; both now aggregate only the actual Step 1
+  operation.
+- Query/retrieval and QA aggregates, QA cost summaries, timing records,
+  incremental cost JSONL writing and final cost JSONL writing are unchanged.
+- The main evaluation results JSON format and contents are unchanged.  The
+  cost JSONL intentionally changes only by omitting the three removed stages
+  and A-Mem update fields listed above.
+
+Compatibility checks completed
+------------------------------
+- Parsed both modified Python files with compile(..., "exec").
+- Ran ruff F401/F821/F841 checks on both modified files: passed.
+- Ran bash -n on the configured entry script: passed.
+- Imported cost_profiler, prestorage_pipeline and the configured driver in
+  the premem Conda environment: passed.
+- Searched Python/shell sources for removed stage constants, Step 2 reasoning,
+  A-Mem evolution operations, UPDATE_OPERATIONS and update fields: no live
+  references remain.
+- Ran a synthetic enabled-profiler contract containing Step 1, query and QA
+  calls.  It verified the revised three-stage order, retained token totals and
+  absence of all three removed stages and update fields: passed.
+
+Not changed because not confirmed as required by this entry's cost schema
+-------------------------------------------------------------------------
+- retrieval_relevance_filter remains a retrieval operation even though this
+  fixed entry currently does not emit it; it is not one of the requested
+  removed phases.
+- Generic memory_metadata default labels and the existing retrieval timing
+  name were not changed.  They do not contribute a call or removed cost field
+  on the fixed step1_prompt_only path; changing them would exceed this
+  cost-schema cleanup.
+- Compatibility of external tools that consume the deleted cost JSON fields
+  cannot be confirmed from this entry's repository call chain.
+
+Full GPU/vLLM evaluation was not started by this cleanup record.  The above
+checks validate static imports, entry parsing and the cost-profiler behavior
+without changing prompts, datasets, result files or caches.

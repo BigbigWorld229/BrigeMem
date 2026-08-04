@@ -1,0 +1,149 @@
+MemWeave 强制全量重建缓存与移除人工版本标记修改记录
+========================================================
+
+日期：2026-07-24（Asia/Shanghai）
+
+一、原问题
+
+运行入口：
+  hpc/memweave-qwen3-2507-locomo.sh
+
+入口在 FORCE_REBUILD_CACHE=1 时已向 Python driver 传递
+--force-rebuild-cache，但原实现仅禁止读取最终 memory cache。进入重建分支后：
+  - Step 1 仍会读取 premem_step1_ours.jsonl；
+  - Step 2 仍会读取 premem_step2_ours_reasoning.jsonl；
+  - Step 1/Step 2 embedding 保存函数仍会读取历史聚合 pickle；
+  - 因此可能只重建最终 memory/retriever，却复用历史文本、reasoning 和 embedding
+    中间结果。
+
+此外，prestorage_pipeline.py 使用人工递增的 PRESTORAGE_CACHE_VERSION 控制缓存
+失效，并把 cache_version 写入 Step 1、Step 2、final notes 和最终 memory cache
+metadata。每次协议变化需要手工提升数字，缓存复用依赖该版本比较。
+
+二、修改文件和函数
+
+1. prestorage_pipeline.py
+
+修改类/函数：
+  - Step1NoteRecord.to_cache_row()
+  - PreStoragePipeline.__init__()
+  - PreStoragePipeline.prepare_force_rebuild()（新增）
+  - PreStoragePipeline.build_final_notes_for_sample()
+  - PreStoragePipeline._load_final_note_payloads()
+  - PreStoragePipeline._save_final_note_payloads()
+  - PreStoragePipeline._upgrade_cached_step1_rows()
+  - PreStoragePipeline._build_step1_records()
+  - PreStoragePipeline._build_step2_records()
+  - populate_agent_memory_from_prestorage()
+
+修复逻辑：
+  - 删除 PRESTORAGE_CACHE_VERSION、版本匹配 helper、所有 cache_version
+    写入、读取、比较和日志。
+  - force_rebuild_cache=True 时，跳过最终 cache metadata 读取。
+  - 在强制运行首次构建样本前，一次性删除该 cache variant 下所有历史
+    Step 1、Step 2、final-note JSONL 和 embedding/index/text/pool pickle。
+  - 将 force_rebuild 显式传入 Step 1 和 Step 2 构建函数，使两个阶段都不进入
+    JSONL cache-hit 分支。
+  - 每个样本开始强制重建前，删除该样本的 memory pickle、metadata JSON、
+    retriever pickle 和 retriever embedding NPY；随后全部重新写入。
+  - 中间缓存只在强制运行开始时清理一次。后续样本读取的聚合 pickle 仅包含
+    本次运行前面样本刚生成的内容，用于保留本次运行的多样本聚合结果。
+  - force_rebuild_cache=False 时，继续按文件存在性和两个 A-Mem 开关是否匹配
+    复用最终缓存；Step 1、Step 2 继续按已有 JSONL 复用，不再依赖协议版本。
+
+2. hpc/memweave_qwen25_3b_locomo_driver.py
+
+修改函数：
+  - parse_args()
+
+修改内容：
+  - 更新 --force-rebuild-cache 帮助文本，明确其覆盖 Step 1、Step 2、
+    embedding、memory 和 retriever 全部缓存，并且不读取历史运行产物。
+
+3. test_ablation_independence.py
+
+修改内容：
+  - 删除 PRESTORAGE_CACHE_VERSION 导入及 cache_version metadata 断言。
+  - 更新 fake pipeline 接口，断言 force 标志到达 Step 1 和 Step 2。
+  - 新增强制运行一次性清除 11 类中间文件的测试。
+  - 新增强制模式不加载旧最终缓存并删除旧 retriever/NPY 的测试。
+  - 新增普通模式在无协议版本字段时仍复用匹配缓存的测试。
+
+4. hpc/memweave-qwen3-2507-locomo.sh
+
+该实际入口已正确将 FORCE_REBUILD_CACHE=1 转换为 --force-rebuild-cache，且原本
+不存在 PRESTORAGE_CACHE_VERSION 参数或引用，因此无需修改。其参数现在由上述
+driver 和 pipeline 实现完整重建语义。
+
+三、缓存组件与实际目录
+
+入口默认基础目录：
+  /home/jwcao/xingzhuo/slm_memory_agent/code/MemWeave/hpc/cache/
+    memweave_qwen3_4b_2507_locomo_eval/
+
+运行时在基础目录后追加 compressor cache_tag：
+  - 当前入口默认 LLMLINGUA_PRE_STEP1_COMPRESSION=false：
+      plain/
+  - 启用当前默认压缩参数时：
+      llmlingua_r090_min24/
+  - PRESTORAGE_STEP1_USE_EXISTING_NOTE_PROMPT=false 时，再追加：
+      _step1_note_prompt_ablation
+
+以下文件均位于最终 cache variant 目录中。
+
+Step 1 文本与 metadata：
+  - premem_step1_ours.jsonl
+
+Step 1 embedding/index/text/session pool：
+  - premem_step1_embeddings_Qwen__Qwen3-4B-Instruct-2507.pkl
+  - premem_step1_id2index_Qwen__Qwen3-4B-Instruct-2507.pkl
+  - premem_step1_id2text_Qwen__Qwen3-4B-Instruct-2507.pkl
+  - premem_step1_session_pool_Qwen__Qwen3-4B-Instruct-2507.pkl
+
+Step 2 reasoning：
+  - premem_step2_ours_reasoning.jsonl
+
+Step 2 embedding/index/text/session pool：
+  - premem_step2_embeddings_Qwen__Qwen3-4B-Instruct-2507.pkl
+  - premem_step2_id2index_Qwen__Qwen3-4B-Instruct-2507.pkl
+  - premem_step2_id2text_Qwen__Qwen3-4B-Instruct-2507.pkl
+  - premem_step2_session_pool_Qwen__Qwen3-4B-Instruct-2507.pkl
+
+备用 build_final_notes_for_sample() 路径的 final-note cache：
+  - premem_final_notes.jsonl
+
+最终 memory cache：
+  - memory_cache<ablation_suffix>_sample_<N>.pkl
+  - memory_cache<ablation_suffix>_sample_<N>.meta.json
+
+最终 retriever cache：
+  - retriever_cache<ablation_suffix>_sample_<N>.pkl
+  - retriever_cache_embeddings<ablation_suffix>_sample_<N>.npy
+
+当前入口配置为 Step 1 A-Mem=false、Step 2 A-Mem=true，因此默认 suffix 为：
+  _amem_after_step1_off
+
+四、为何强制重建不会命中旧缓存
+
+  1. 最终 metadata 的读取条件明确要求 force_rebuild_cache=False。
+  2. force_rebuild_cache=True 时先清理所有历史中间文件，再执行任何 Step 1/Step 2
+     构建或 embedding 聚合读取。
+  3. Step 1 和 Step 2 的 cached_rows 在 force_rebuild=True 时固定为空，不执行
+     STEP1_CACHE_HIT 或 STEP2_CACHE_HIT 分支。
+  4. 每个样本的 memory/retriever 四类最终文件在 cache_ready 判断前删除。
+  5. Step 1 文本和 metadata、Step 1 embedding、Step 2 reasoning、Step 2
+     embedding、A-Mem/direct memory、retriever corpus 和 retriever embeddings
+     按实际调用顺序重新生成并覆盖标准 cache 路径。
+
+五、验证
+
+使用入口实际 Conda 环境执行：
+  /home/jwcao/miniconda3/envs/premem/bin/python -m unittest -v \
+    test_ablation_independence.py
+
+结果：
+  - 6 个测试全部通过。
+  - bash -n hpc/memweave-qwen3-2507-locomo.sh 通过。
+  - 修改的 Python 文件在 premem 环境中 py_compile 通过。
+  - 运行时代码和测试源码中不再存在 PRESTORAGE_CACHE_VERSION 或
+    cache_version 引用。

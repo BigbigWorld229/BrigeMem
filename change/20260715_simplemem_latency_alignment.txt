@@ -1,0 +1,74 @@
+MemWeave 延迟统计与 SimpleMem LoCoMo 评测口径对齐
+日期：2026-07-15
+
+一、参考口径
+
+参考文件：
+- SimpleMem-main/test_locomo10.py
+  - LoCoMoTester.test_sample：Construction Time 从调用
+    self.system.add_dialogues(dialogues) 前开始，到 self.system.finalize() 返回后结束。
+  - LoCoMoTester._process_single_question：Retrieval Time 从调用
+    hybrid_retriever.retrieve(...) 前开始，到该调用返回后结束。
+  - 同一函数：Answer Time 从回答生成分支开始前计时，到回答生成函数返回后结束。
+  - Total Time 直接计算为 retrieval_time + answer_time；质量指标计算发生在计时之后。
+- SimpleMem-main/main.py
+  - SimpleMemSystem.add_dialogues/finalize 分别进入 MemoryBuilder.add_dialogues 和
+    MemoryBuilder.process_remaining，因此 Construction Time 覆盖完整记忆写入和收尾处理。
+- SimpleMem-main/simplemem/core/hybrid_retriever.py
+  - HybridRetriever.retrieve 内部的规划、各路检索、合并、去重及可选反思均包含在
+    Retrieval Time 中。
+- SimpleMem-main/simplemem/core/answer_generator.py
+  - AnswerGenerator.generate_answer 内的上下文格式化、Prompt 构造、LLM 调用和输出解析均包含在
+    Answer Time 中。
+
+二、修改文件和内容
+
+1. hpc/memweave_qwen25_3b_locomo_driver.py
+
+- Table1QwenAgent.answer_question
+  - 将 Retrieval Time 的起点从 QA 调试输出之前移到第一个实际检索操作之前。
+  - Retrieval Time 现在覆盖关键词查询生成及解析、向量检索和链接扩展，结束于检索结果返回；
+    不再包含 QA_START 调试输出和外层 profiling scope 的准备。
+  - 顶层 Retrieval Time 和 Answer Time 改用与 SimpleMem 评测相同的 time.time() 差值。
+  - Answer Time 保持覆盖回答 Prompt 构造、回答 LLM 调用和回答解析，且不包含后续 F1/BLEU 评测。
+
+- main
+  - 每个对话在 build_or_load_memories(...) 紧前开始 Construction Time 计时，函数返回后立即结束。
+  - 对话/agent 初始化和构建前日志不计入；完整的当前记忆构建或缓存加载调用计入。
+  - 将 construction_time_seconds 写入既有 conversation_memory_build_completed 增量事件，
+    未改变事件写入时机、文件路径或增量写入机制。
+
+- aggregate_qa_cost_batch
+  - 新增 total_time_seconds 批次字段，为批次内每个 QA 的 Total Time 之和。
+
+2. cost_profiler.py
+
+- CostProfiler.conversation_memory_build_summary
+  - 增加可选 construction_time_seconds 入参，并将该对话唯一一次完整构建耗时写入构建成本摘要。
+
+- CostProfiler.qa_cost_summary
+  - 新增 total_time_seconds 字段。
+  - 严格按 SimpleMem 的逐 QA 公式计算：
+    total_time_seconds = retrieval_time_seconds + answer_time_seconds。
+  - 未修改 Token、LLM 调用次数或阶段调用归属的统计逻辑。
+
+3. test_cost_profiler.py
+
+- CostProfilerTests.test_per_qa_summary_separates_retrieval_and_answer_costs
+  - 增加 Total Time 等于 Retrieval Time 加 Answer Time 的断言。
+
+- CostProfilerTests.test_incremental_writer_keeps_one_fsynced_event_file
+  - 增加 Construction Time 写入既有对话构建增量事件的断言。
+
+三、未修改范围
+
+- 未修改 Prompt、记忆构建、缓存、检索、回答生成和结果评测逻辑。
+- 未修改 Token 统计、LLM 调用统计或细分阶段延迟统计。
+- 未修改 cost_statistics.jsonl 的路径、事件类型、增量写入频率、flush/fsync 或最终汇总机制。
+
+四、验证
+
+- python -m unittest -v test_cost_profiler.py：6 项测试全部通过。
+- python -m py_compile cost_profiler.py hpc/memweave_qwen25_3b_locomo_driver.py
+  test_cost_profiler.py：通过。
+- 未运行完整模型或 LoCoMo 推理任务。

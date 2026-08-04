@@ -1,0 +1,28 @@
+Run name: memweave_qwen3_4b_2507_locomo_eval
+Variant: plain
+Job ID: 103013
+Dataset: /home/jwcao/xingzhuo/slm_memory_agent/code/MemWeaveMine/data/locomo10.json
+Sample ratio: 1
+Model dir: /home/jwcao/xingzhuo/mimic_dataset_building/models/Qwen3-4B-Instruct-2507
+Model type: qwen3
+Embedding dir: /home/jwcao/xingzhuo/mimic_dataset_building/models/stella_en_400M_v5
+Ablation component: llmlingua_pre_step1_compression=false
+Memory build mode: step1_prompt_only
+Ablation component: locomo_category3_use_existing_prompt=true
+Ablation component: prestorage_step1_use_existing_note_prompt=true
+LLMLingua pre-Step-1 compression enabled: false
+LLMLingua dir: /home/jwcao/xingzhuo/mimic_dataset_building/models/llmlingua-2-bert-base-multilingual-cased-meetingbank
+Force rebuild cache: 1
+Cache base dir: /home/jwcao/xingzhuo/slm_memory_agent/code/MemWeaveMine/hpc/cache/memweave_qwen3_4b_2507_locomo_eval
+Job cache root: /home/jwcao/xingzhuo/slm_memory_agent/code/MemWeaveMine/hpc/cache/memweave_qwen3_4b_2507_locomo_eval/job_103013
+Result dir: /home/jwcao/xingzhuo/slm_memory_agent/code/MemWeaveMine/hpc/results/memweave_qwen3_4b_2507_locomo_eval_plain/job_103013
+Result JSON: /home/jwcao/xingzhuo/slm_memory_agent/code/MemWeaveMine/hpc/results/memweave_qwen3_4b_2507_locomo_eval_plain/job_103013/results.json
+Cost statistics: /home/jwcao/xingzhuo/slm_memory_agent/code/MemWeaveMine/hpc/results/memweave_qwen3_4b_2507_locomo_eval_plain/job_103013/cost_statistics.jsonl (enabled=on)
+vLLM log: /home/jwcao/xingzhuo/slm_memory_agent/code/MemWeaveMine/hpc/logs/memweave_qwen3_4b_2507_locomo_eval_vllm_plain_103013.log
+[DEBUG_QWEN_COMPARE] HPC_CONFIG job_id=103013 host=gpu16 pwd=/home/jwcao/xingzhuo/slm_memory_agent/code/MemWeaveMine conda_env=premem python=/home/jwcao/miniconda3/envs/premem/bin/python
+[DEBUG_QWEN_COMPARE] HPC_PATHS model_dir=/home/jwcao/xingzhuo/mimic_dataset_building/models/Qwen3-4B-Instruct-2507 model_name=Qwen/Qwen3-4B-Instruct-2507 model_type=qwen3 dataset=/home/jwcao/xingzhuo/slm_memory_agent/code/MemWeaveMine/data/locomo10.json embedding_model=/home/jwcao/xingzhuo/mimic_dataset_building/models/stella_en_400M_v5 llmlingua_model=/home/jwcao/xingzhuo/mimic_dataset_building/models/llmlingua-2-bert-base-multilingual-cased-meetingbank cache_dir=/home/jwcao/xingzhuo/slm_memory_agent/code/MemWeaveMine/hpc/cache/memweave_qwen3_4b_2507_locomo_eval/job_103013 output=/home/jwcao/xingzhuo/slm_memory_agent/code/MemWeaveMine/hpc/results/memweave_qwen3_4b_2507_locomo_eval_plain/job_103013/results.json
+[DEBUG_QWEN_COMPARE] HPC_RUNTIME port=49112 max_model_len=16384 vllm_generation_config=auto eval_cuda_visible_devices=empty memory_build_mode=step1_prompt_only llmlingua_device=cpu force_rebuild_cache=1 llmlingua_pre_step1_compression=false
+[DEBUG_QWEN_COMPARE] HPC_MAX_TOKENS default=unset step1=unset qa=256
+[DEBUG_QWEN_COMPARE] MODULE_PATHS driver=/home/jwcao/xingzhuo/slm_memory_agent/code/MemWeaveMine/hpc/memweave_qwen25_3b_locomo_driver.py dataset_loader=/home/jwcao/xingzhuo/slm_memory_agent/code/MemWeaveMine/load_dataset.py memory_layer=/home/jwcao/xingzhuo/slm_memory_agent/code/MemWeaveMine/memory_layer_robust.py
+[DEBUG_QWEN_COMPARE] PROCESS_EXCEPTION entrypoint=/home/jwcao/xingzhuo/slm_memory_agent/code/MemWeaveMine/hpc/memweave_qwen25_3b_locomo_eval.py exception_type=NameError message="name 'parse_relevant_parts' is not defined"
+[DEBUG_QWEN_COMPARE] SHELL_EXIT job_id=103013 exit_status=1 vllm_pid=3632998

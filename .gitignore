@@ -1,0 +1,22 @@
+
+# HPC generated artifacts
+hpc/cache/
+hpc/logs/
+hpc/results/
+hpc/tmp*
+
+# Other caches
+.hf_cache/
+__pycache__/
+*.pyc
+
+# Generated HPC artifacts
+hpc/cache/
+hpc/logs/
+hpc/results/
+hpc/tmp*
+
+# Python and model caches
+.hf_cache/
+__pycache__/
+*.pyc

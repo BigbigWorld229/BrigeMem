@@ -1,0 +1,206 @@
+MemWeaveMine 当前入口旧 A-Mem / Step 2 代码清理记录
+
+日期：2026-08-03
+项目：/home/jwcao/xingzhuo/slm_memory_agent/code/MemWeaveMine
+运行入口：hpc/memweave-qwen3-2507-locomo.sh
+
+一、清理边界
+
+入口脚本固定 MEMORY_BUILD_MODE="step1_prompt_only"，实际调用链为：
+
+memweave-qwen3-2507-locomo.sh
+  -> hpc/memweave_qwen25_3b_locomo_eval.py
+  -> hpc/memweave_qwen25_3b_locomo_driver.py:main
+  -> build_or_load_memories
+  -> populate_agent_memory_from_prestorage
+  -> PreStoragePipeline._build_step1_records
+  -> populate_direct_step1_memory
+  -> find_direct_step1_memories_raw
+  -> QA / 评测 / 增量结果和成本输出
+
+本次只删除当前入口不再进入、且用于以下旧模块的代码：
+
+1. Step 1 A-Mem 更新与演化；
+2. Step 2 Pre-Storage premem_step2_reasoning；
+3. Step 2 A-Mem 更新与演化。
+
+二、修改文件及详细内容
+
+1. prestorage_pipeline.py
+
+文件由 1728 行精简为 816 行。
+
+删除内容：
+
+- 删除 legacy_full 模式常量、模式校验和所有 enable_amem_after_step1 / enable_amem_after_step2 分支、参数、缓存后缀、缓存 metadata 字段和调试字段。
+- 删除 Step 1 A-Mem add/evolve 分支；当前流程固定使用 populate_direct_step1_memory。
+- 删除 Step 2 reasoning 全链：
+  _save_step1_embedding_artifacts、_build_step2_records、_parse_step2_rows、
+  _save_step2_embedding_artifacts、聚类和相似度计算辅助函数。
+- 删除 Step 2 数据结构和直接/A-Mem 写入函数：
+  DirectStep2Memory、Step2InsightRecord、add_direct_step2_records_to_agent、
+  add_step2_records_to_agent。
+- 删除只为 Step 2 服务的 _LazyEmbedder、pandas、KMeans、silhouette_score、
+  NumPy 批量 embedding artifact、hash 和 pickle-dict 辅助代码。
+- 删除 final-note 旧 API 及缓存：has_final_notes_for_sample、
+  build_final_notes_for_sample、_load/_save_final_note_payloads、
+  _compose_final_note_payloads、add_memory_payloads_to_agent。
+- 删除 Step1NoteRecord.key 和 optimized_text；保留当前直接检索使用的 embed_text。
+- prepare_force_rebuild 只清理当前 Step 1 JSONL；保留现有
+  premem_step1_ours.jsonl、memory_cache_step1_prompt_only_*、
+  retriever_cache_step1_prompt_only_* 和 embedding .npy 缓存命名。
+- populate_agent_memory_from_prestorage 精简为当前唯一路径：
+  Step 1 Prompt 提取 -> DirectStep1Memory -> retriever -> cache/save。
+
+明确保留：
+
+- 两个 Step 1 Prompt 文本，逐字未改；
+- Step1NoteRecord、DirectStep1Memory；
+- Step 1 metadata 提取、旧 Step 1 cache 升级、启发式缺省值；
+- populate_direct_step1_memory、find_direct_step1_memories_raw；
+- 当前 memory/retriever cache 读写和 force rebuild 行为。
+
+2. memory_layer.py
+
+文件由 1001 行精简为 322 行。
+
+删除内容：
+
+- 删除旧 BaseLLMController、OpenAI/Ollama/SGLang/LiteLLM controller 和
+  LLMController；当前入口使用 memory_layer_robust.py 的 controller。
+- 删除旧 MemoryNote、AgenticMemorySystem、A-Mem evolution prompt、
+  process_memory、consolidate_memories、link expansion 和文件内 run_tests。
+- 删除 SimpleEmbeddingRetriever.load_from_local_memory；该方法仅由已删除的
+  legacy cache fallback 调用。
+- 清理只由上述旧实现使用的导入。
+
+明确保留：
+
+- SimpleEmbeddingRetriever 的 __init__、add_documents、search、save、load；
+  这些是当前 Step 1 direct 检索、QA 和缓存恢复所需方法，方法 AST 与修改前一致。
+- HybridRetriever 及其辅助 simple_tokenize。它不属于本次三个旧模块，且无法确认
+  是否存在独立使用者，因此没有按“当前入口未调用”直接删除。
+- 为保留的 HybridRetriever.add_document 补充原代码缺失的 torch 导入，避免保留代码
+  继续存在未定义名称。
+
+3. memory_layer_robust.py
+
+文件由 643 行精简为 628 行。
+
+删除内容：
+
+- 删除 RobustAgenticMemorySystem 中仅供 A-Mem evolution 使用的
+  evo_threshold 参数、evo_cnt/evo_threshold 属性和日志字段。
+- 将已经不存在的 RobustMemoryNote 类型注解改为 Dict[str, Any] 容器注解；
+  memories 的运行时数据和行为不变。
+- 删除此前 A-Mem 实现遗留且完全未使用的 List、json、uuid、datetime、
+  顶层 transformers 模型类、simple_tokenize、validate_analysis_result 导入。
+- 删除 resolve_qwen_chat_template 中未使用的 normalized 局部变量。
+
+明确保留：
+
+- RobustLLMController 及 vLLM/OpenAI/Ollama/SGLang controller；这些 controller
+  仍可服务 Step 1 Prompt 和 QA，不能仅因当前 shell 使用 vLLM 就删除。
+- Qwen tokenizer/chat template、重试、token usage 和 CostProfiler 记录逻辑。
+- RobustAgenticMemorySystem 作为 memories、SimpleEmbeddingRetriever 和 QA LLM
+  controller 的当前容器。
+
+4. hpc/memweave_qwen25_3b_locomo_driver.py
+
+文件由 1084 行精简为 1038 行。
+
+删除内容：
+
+- 删除 MEMORY_BUILD_MODE_LEGACY 导入和 legacy_full 参数分支；
+  --memory-build-mode 仍保留，唯一允许值和默认值为 step1_prompt_only，
+  与当前 shell 的参数和结果字段一致。
+- 删除 Table1QwenAgent 的 enable_amem_after_step1、enable_amem_after_step2、
+  memory_build_mode 参数/属性和 link-expansion 诊断字段。
+- 删除 build_or_load_memories 及其下游调用中的 A-Mem 参数传递。
+- 删除 main 中 legacy ablation 分支和 A-Mem ablation 输出键；当前入口本来不会
+  产生这些键，因此当前结果 JSON 的 ablation 内容不变。
+- 删除未使用的 pickle 导入和 PreStoragePipeline 的旧 embedding_model_name 传参。
+
+明确保留：
+
+- Step 1 Prompt 构建调用；
+- keyword query rewrite、直接向量检索、QA Prompt 和答案解析；
+- F1/BLEU1 评测；
+- 每 10 个 QA 的原子增量结果写入；
+- individual_results、summary、is_complete 等结果结构；
+- 增量 cost_statistics.jsonl 和 final_summary 写入。
+
+5. cost_profiler.py
+
+未修改，修改前后逐字节一致。
+
+原因：旧 A-Mem/Step 2 阶段目前只形成零值兼容桶，但 stage_order、stages、
+update_tokens/update_stage 已属于现有 cost JSON schema，driver 终端日志也读取
+update_tokens_k。删除这些字段会违反“不改变结果字段、文件结构和统计口径”的要求。
+因此保留旧阶段零值字段；当前 Step 1、query rewrite、retrieval/answer 的统计聚合方式不变。
+
+三、验证结果
+
+1. shell / Python 语法
+
+- bash -n hpc/memweave-qwen3-2507-locomo.sh：通过。
+- py_compile：prestorage_pipeline.py、memory_layer.py、memory_layer_robust.py、
+  driver.py、cost_profiler.py、实际 eval wrapper 全部通过。
+- ruff F401/F821/F841：五个目标文件全部通过。
+
+2. 跨文件引用
+
+- 目标四个修改文件中已无 legacy_full、A-Mem 开关、Step 2 record/artifact、
+  premem_step2_reasoning、evo_threshold/evo_cnt 等残留引用。
+- 当前保留的 HybridRetriever.load_from_local_memory 是同名独立通用方法，不属于
+  已删除的 SimpleEmbeddingRetriever legacy fallback。
+
+3. 真实导入和构造器
+
+- 使用入口 conda 环境 premem 执行 import_repo_modules：通过。
+- 成功加载 RobustAgenticMemorySystem、RobustLLMController、数据加载器和两个 parser。
+- 使用本地 Stella embedding 模型构造 Table1QwenAgent：通过，embedding_dim=1024。
+- 构造 PreStoragePipeline：通过，无删除参数导致的参数不匹配。
+
+4. 当前 shell 参数
+
+- 用当前 shell 的完整 Python 参数调用 parse_args：通过。
+- 解析结果：memory_build_mode=step1_prompt_only、model_type=qwen3、
+  force_rebuild_cache=True、cost_profiling=on。
+
+5. Step 1 direct 记忆和缓存
+
+- 使用轻量 fake retriever/pipeline 执行 populate_agent_memory_from_prestorage：通过。
+- 确认生成 DirectStep1Memory、检索 corpus，并保持以下文件名：
+  memory_cache_step1_prompt_only_sample_0.pkl
+  memory_cache_step1_prompt_only_sample_0.meta.json
+  retriever_cache_step1_prompt_only_sample_0.pkl
+  retriever_cache_embeddings_step1_prompt_only_sample_0.npy
+
+6. 数据与输出行为
+
+- LoCoMo 数据读取通过：10 samples、1986 QA、5882 turns。
+- 修改前后 AST 对比确认以下保留逻辑完全一致：
+  Step 1 metadata/note/record 构建、Step 1 direct memory、直接检索、query rewrite、
+  QA、F1/BLEU1、result payload、QA cost batch、atomic JSON write、
+  SimpleEmbeddingRetriever 当前五个方法。
+- 两个 Step 1 Prompt 常量逐字一致。
+- cost_profiler.py 修改前后逐字节一致，成本 schema 和统计口径不变。
+
+未执行完整 GPU/vLLM LoCoMo 推理：该验证需要启动本地 vLLM 服务并运行完整数据集，
+不属于本次本地轻量检查条件。模块导入、模型/控制器构造和入口参数均已验证。
+
+四、无法确认并保留的内容
+
+- memory_layer.py 的 HybridRetriever：不属于本次三个旧模块，可能有独立调用者。
+- memory_layer_robust.py 的非 vLLM backend：仍可用于当前 Step 1/QA 控制器接口。
+- cost_profiler.py 的旧阶段零值桶和 update 字段：为保持既有输出 schema 和统计口径。
+- Step1NoteRecord.to_cache_row 中现有字段、结果 JSON 字段及增量成本事件字段：
+  均保留，未按静态未读结果删除。
+
+五、兼容性边界
+
+本次以用户指定的当前入口及项目内引用为边界。已删除的 final-note/Step 2 API 在项目
+Python 和 shell 源码中没有当前调用者，且它们直接属于已下线的 Step 2 功能岛。
+项目目录之外若有第三方代码直接导入这些旧 API，无法由本项目调用链验证；此类外部
+消费者需要迁移到 Step 1 direct 流程。

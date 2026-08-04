@@ -1,0 +1,67 @@
+MemWeave Step 2 后 A-Mem 消融开关变更记录
+==========================================
+
+时间：2026-07-16 11:02 CST
+
+一、配置文件
+
+1. ablation_config.json
+   - 在现有 components 对象中新增布尔项：
+     amem_after_step2_update_and_evolution。
+   - true（默认）：Step 2 关系推理输出继续调用 A-Mem 更新与记忆演化。
+   - false：Step 2 关系推理照常执行，但其输出不进入 A-Mem，改为原样加入后续记忆与检索库。
+   - components 仍允许继续添加其他布尔消融项。
+
+2. ablation_config.py
+   - 新增常量 AMEM_AFTER_STEP2，供 Python driver 严格读取对应配置项。
+   - 现有 JSON 结构和布尔类型校验逻辑保持不变。
+
+二、启动脚本
+
+1. hpc/memweave-qwen25-locomo.sh
+   - 新增对 amem_after_step2_update_and_evolution 必填项的检查。
+   - 沿用现有通用 components 遍历，运行开始时打印包括新开关在内的全部组件名称与布尔值。
+   - 配置路径继续通过 --ablation-config 传入 Python driver。
+
+三、必要代码
+
+1. hpc/memweave_qwen25_3b_locomo_driver.py
+   - main() 通过 AblationConfig.require(AMEM_AFTER_STEP2) 读取新开关。
+   - build_or_load_memories() 新增 enable_amem_after_step2 参数，并传给
+     populate_agent_memory_from_prestorage()。
+   - LoCoMo 主循环把解析后的开关传入每个样本的记忆构建流程。
+
+2. prestorage_pipeline.py
+   - 新增 DirectStep2Memory：保存 Step2InsightRecord 的 content、timestamp、keywords、context、
+     tags 和原始 embed_text；links 固定为空列表。
+   - 新增 add_direct_step2_records_to_agent()：把 Step 2 输出直接追加到现有 Step 1 记忆字典，
+     并把 Step2InsightRecord.embed_text 原样加入检索器；不调用 agent.add_memory()、
+     memory_system.add_note() 或 process_memory()。
+   - 新增 _retrieval_documents_from_cached_memories()：检索器缓存文件缺失时，混合缓存中的
+     DirectStep2Memory 仍使用其原始 retrieval_text 重建，避免经过 A-Mem 文本组织。
+   - populate_agent_memory_from_prestorage() 新增 enable_amem_after_step2：
+     * true：保持原有 add_step2_records_to_agent() 调用不变；
+     * false：Step 1 A-Mem、Step 2 关系推理及 Step 2 embedding artifact 均照常完成，随后调用
+       add_direct_step2_records_to_agent()，完全跳过 Step 2 后 A-Mem 更新与演化。
+   - 新开关状态写入 cache metadata；关闭状态使用 _amem_after_step2_off 缓存后缀，避免与开启
+     状态的记忆和检索器缓存交叉复用。
+   - 若现有 amem_after_step1_update_and_evolution=false，原流程在 Step 1 后已直接返回，Step 2
+     不执行；这是现有 Step 1 消融行为，新开关未改变该逻辑。
+
+四、验证
+
+1. python -m py_compile：配置加载器、prestorage pipeline、driver 和 eval 入口通过。
+2. bash -n hpc/memweave-qwen25-locomo.sh：通过。
+3. 默认配置解析成功，启动配置输出包含三个布尔项。
+4. 无模型断言测试通过：
+   - false 时仅 Step 1 调用 agent.add_memory()，Step 2 不调用 A-Mem；
+   - Step 1 记忆的 content、links、evolution_history 在 Step 2 追加前后不变；
+   - DirectStep2Memory 内容和元信息等于 Step2InsightRecord，links 为空；
+   - Step 2 检索文档严格等于 Step2InsightRecord.embed_text；
+   - false 缓存复用保持上述行为，且不调用记忆生成路径；
+   - true 时仍由 A-Mem 写入 Step 2，不创建 DirectStep2Memory。
+
+五、范围
+
+- 未修改 Step 1、Step 2 推理算法、提示词、问答、评测指标或其他模型启动脚本。
+- 未启动 vLLM，也未执行完整 LoCoMo 作业；验证覆盖静态入口及不依赖模型服务的开关逻辑。

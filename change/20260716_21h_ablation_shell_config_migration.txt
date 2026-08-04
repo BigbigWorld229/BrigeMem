@@ -1,0 +1,115 @@
+MemWeave 消融配置迁移到 HPC Shell 变更记录
+================================================
+
+时间：2026-07-16 21:11 CST
+
+一、目标
+
+将原 ablation_config.json 中的五个布尔开关迁移到 HPC 批处理脚本，使 Slurm 在
+sbatch 提交时把每次实验的开关值随脚本一起保存，不再在任务开始运行时读取共享的
+外部 JSON 配置文件。
+
+二、修改和删除的文件
+
+1. 修改 hpc/memweave-qwen25-locomo.sh
+2. 修改 hpc/memweave-qwen3-2507-locomo.sh
+   - Qwen3 与 Qwen2.5 共用同一个 Python driver；为避免共享入口改造后 Qwen3 失效，
+     同步改为直接传递五个布尔参数。
+3. 修改 hpc/memweave_qwen25_3b_locomo_driver.py
+4. 删除 ablation_config.json
+5. 删除 ablation_config.py
+6. 新增 change/20260716_21h_ablation_shell_config_migration.txt
+
+三、Shell 脚本修改内容
+
+1. 新增可手动编辑的五个 Shell 布尔变量，默认值保持迁移前不变：
+   - LLMLINGUA_PRE_STEP1_COMPRESSION=true
+   - AMEM_AFTER_STEP1_UPDATE_AND_EVOLUTION=true
+   - AMEM_AFTER_STEP2_UPDATE_AND_EVOLUTION=false
+   - LOCOMO_CATEGORY3_USE_EXISTING_PROMPT=true
+   - PRESTORAGE_STEP1_USE_EXISTING_NOTE_PROMPT=true
+
+2. 新增函数 validate_ablation_boolean()
+   - 逐项校验五个变量只能为字面值 true 或 false。
+   - 非法值输出组件名称并返回状态码 2，配合 set -e 使任务在启动 vLLM 前失败。
+
+3. 调整函数 append_llmlingua_args()
+   - 保留 LLMLingua 模型目录非空、目录存在和压缩参数构造逻辑。
+   - 不再通过 --enable-precompress 作为 HPC 消融配置来源；LLMLingua 是否启用改由
+     新的 --llmlingua-pre-step1-compression 布尔参数直接控制。
+
+4. 删除外部配置逻辑
+   - 删除 ABLATION_CONFIG 路径变量。
+   - 删除对 ablation_config.py 的调用。
+   - 删除关联数组 ABLATION_COMPONENTS 和 JSON 解析输出处理。
+   - 删除 --ablation-config 路径参数及日志中的配置文件路径。
+
+5. 新增五个显式 Python 启动参数
+   - --llmlingua-pre-step1-compression
+   - --amem-after-step1-update-and-evolution
+   - --amem-after-step2-update-and-evolution
+   - --locomo-category3-use-existing-prompt
+   - --prestorage-step1-use-existing-note-prompt
+
+6. 启动日志
+   - 保留并改为直接打印五个组件名称及 Shell 当前 true/false 值。
+   - RUN_VARIANT 的 precompress/plain 选择仍由 LLMLingua 开关控制。
+
+四、Python driver 修改的函数及具体内容
+
+1. 新增 parse_boolean(value)
+   - 将 CLI 的 true/false 文本严格转换为 Python bool。
+   - 其他值触发 argparse.ArgumentTypeError。
+
+2. 修改 parse_args()
+   - 删除 --ablation-config 路径参数。
+   - 新增五个 required=True 的显式布尔参数，避免 Python 端形成第二套默认配置。
+
+3. 修改 main()
+   - 删除 ablation_config 模块导入、路径解析、文件读取和 require() 调用。
+   - 直接从五个 argparse 字段取得开关值。
+   - 将 llmlingua_pre_step1_compression 赋给现有 args.enable_precompress，继续驱动
+     原 build_turn_compressor_from_args() 流程。
+   - 继续把 Step 1/2 A-Mem、Category 3 prompt 和 Step 1 note prompt 布尔值传给
+     原有处理函数；未修改这些组件的实现或判断逻辑。
+   - 仍在启动日志中逐项输出组件名称和值。
+
+4. 修改 build_result_payload()
+   - 结果 JSON 继续保存 ablation.components 五个实际值。
+   - 删除已不存在的 ablation.config_file 路径字段。
+
+五、删除文件说明
+
+1. ablation_config.json
+   - 五个默认值已完整迁移到 HPC Shell，运行时不再需要共享 JSON。
+
+2. ablation_config.py
+   - 所有运行时调用者已改用显式 CLI 布尔参数，专用 JSON 解析器不再有调用者。
+
+六、验证结果
+
+1. bash -n hpc/memweave-qwen25-locomo.sh：通过。
+2. bash -n hpc/memweave-qwen3-2507-locomo.sh：通过。
+3. memweave_qwen25_3b_locomo_driver.py Python AST 解析：通过。
+4. 在 premem Conda 环境运行 HPC Python 入口 --help：通过，五个参数均存在且必填。
+5. 在 premem 环境解析迁移后的默认组合，得到 True、True、False、True、True，
+   与原 ablation_config.json 完全一致。
+6. 检查运行时 Python、Shell 和 JSON 源文件，没有残留 ABLATION_CONFIG、
+   --ablation-config、load_ablation_config 或 ablation_config 路径引用。
+7. 检查 driver 接线：五个值继续进入原 LLMLingua、Step 1/2 A-Mem、Category 3 prompt
+   和 Step 1 note prompt 控制位置。
+8. 本次未提交 Slurm 作业、未启动 vLLM，也未修改各消融组件的实际处理逻辑。
+
+七、Qwen3 后续对齐核对（2026-07-16 21:19 CST）
+
+1. 再次读取 hpc/memweave-qwen25-locomo.sh 与
+   hpc/memweave-qwen3-2507-locomo.sh，确认两个脚本均已采用脚本内五个 Shell
+   布尔变量、validate_ablation_boolean() 校验、五行启动日志以及相同的五个 Python
+   CLI 参数，不读取或传递 ablation_config.json。
+2. 核对时 Qwen2.5 脚本中的 AMEM_AFTER_STEP2_UPDATE_AND_EVOLUTION 已为 true，
+   Qwen3 仍为 false；本次将 Qwen3 调整为 true，使两个脚本当前五个默认值完全一致：
+   true、true、true、true、true。
+3. 将 Qwen3 消融配置区注释与 Qwen2.5 对齐，明确只在提交前编辑 true/false，且
+   Slurm 会把这些赋值保存在提交的批处理脚本快照中。
+4. Qwen3 原有模型路径、MODEL_TYPE、SAMPLE_RATIO、端口、上下文长度、生成上限、
+   RUN_NAME、缓存和结果目录等非消融参数均未修改。

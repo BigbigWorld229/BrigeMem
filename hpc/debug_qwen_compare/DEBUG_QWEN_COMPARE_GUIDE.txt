@@ -1,0 +1,240 @@
+MemWeave Qwen2.5 / Qwen3 one-sample debug instrumentation guide
+================================================================
+
+Purpose
+-------
+These diagnostics compare two one-sample HPC runs without changing retrieval,
+memory construction, model parameters, cache behavior, batching, truncation,
+filtering, return values, or other business behavior. Every new runtime line uses
+the prefix:
+
+  [DEBUG_QWEN_COMPARE]
+
+No full prompt or conversation is printed. Question previews are limited to 100
+characters. Error response previews are limited to 100 characters and normally
+contain only the vLLM validation message.
+
+Important token-count note
+--------------------------
+Fields ending in "tokens_est" are deliberately lightweight whitespace/simple
+token estimates. The client does not load a second Hugging Face tokenizer just
+for debugging, because doing so would change CPU memory and timing. Exact tokens
+reported by vLLM appear in:
+
+  LLM_HTTP_AFTER ... usage={'prompt_tokens': ...}
+
+For rejected requests, LLM_HTTP_ERROR and the existing vLLM 400 response report
+the exact message/completion/requested token counts. "tokenizer_name" records the
+served model whose tokenizer/chat template vLLM applies.
+
+Modified files and debug points
+-------------------------------
+
+1. hpc/memweave-qwen25-locomo.sh
+   hpc/memweave-qwen3-2507-locomo.sh
+
+   Added:
+   - HPC_CONFIG: job, host, working directory, Conda env, Python executable.
+   - HPC_PATHS: model, dataset, embedding, LLMLingua, cache and output paths.
+   - HPC_RUNTIME: port, max_model_len, generation config, device and cache flags.
+   - HPC_MAX_TOKENS: resolved operation-specific limits ("unset" on Qwen2.5 when
+     the corresponding environment variable is absent).
+   - SHELL_EXIT: shell exit status and vLLM PID.
+
+   Purpose: prove the effective job parameters instead of assuming the current
+   shell script is identical to the script snapshot submitted to Slurm.
+
+2. hpc/memweave_qwen25_3b_locomo_eval.py
+
+   Added:
+   - PROCESS_EXCEPTION: bounded top-level exception marker before re-raising from
+     the actual HPC entrypoint.
+
+3. hpc/memweave_qwen25_3b_locomo_driver.py
+
+   Added:
+   - MODULE_PATHS and DRIVER_ARGS: actual imported files and parsed arguments.
+   - DATASET_LOADED: dataset path and sample count.
+   - SAMPLE_START/SAMPLE_END: sample ordinal, sessions, turns, QAs, memory/corpus
+     counts and token statistics.
+   - STAGE_START/STAGE_END: memory-build and QA boundaries.
+   - QA_ID/QA_START: sample/global QA identity, category and safe question preview.
+   - QA_PROMPT: query, retrieved context, system and final prompt lengths.
+   - QA_EXCEPTION/QA_END: failure location and whether the prediction is empty.
+
+   Deep memory functions do not receive sample_id. Their current sample is the
+   most recent SAMPLE_START that has not yet reached SAMPLE_END. Function
+   signatures were intentionally not changed just to pass debug context.
+
+4. prestorage_pipeline.py
+
+   Added:
+   - PRESTORAGE_INIT: backend/model/cache/embedder configuration.
+   - STEP1_START/CACHE_HIT/RECORD/END: cache state, speaker preservation,
+     compression lengths and metadata field lengths without full text.
+   - STEP2_START/CACHE_HIT/CLUSTER_INPUT/REASONING_INPUT/OUTPUT/END: record,
+     cluster and reasoning prompt/output sizes.
+   - STEP1_MEMORY_ADD and STEP2_MEMORY_ADD boundaries.
+   - MEMORY_POPULATE_START/END: final-memory cache decision and final counts.
+   - PRESTORAGE_EMBED_*: clustering embedder model/device, input count, character
+     and estimated-token distributions, and embedding shape.
+   - STEP2_PARSE_EXCEPTION: malformed reasoning output count/size.
+
+   Purpose: find the first stage where the two models produce different record
+   counts or longer content/context/summary/tags.
+
+5. memory_layer_robust.py
+
+   Added:
+   - VLLM_CONTROLLER_INIT: model/tokenizer alias and endpoint.
+   - LLM_CALL/LLM_CALL_DONE: operation name, resolved max_tokens, lengths, usage
+     and runtime.
+   - LLM_HTTP_BEFORE/AFTER/ERROR: final request fields, exact server usage or
+     bounded validation error preview.
+   - MEMORY_SYSTEM_INIT and MEMORY_ADD_START/END: memory/corpus/evolution counts.
+   - CONSOLIDATE_START/END: trigger number, memory count and rebuild output count.
+   - RETRIEVAL_START/PRIMARY/NEIGHBOR/END: top-k indices, candidate count, link
+     expansion, every appended block's field sizes and final context size.
+   - EVOLUTION_EXCEPTION: stage counters and bounded exception message.
+
+   Purpose: identify oversized LLM operations, link expansion, and consolidation
+   frequency without changing the original exception handling.
+
+6. memory_layer.py
+
+   Added:
+   - RETRIEVER_EMBED_INIT: effective Stella model, device and dimension.
+   - RETRIEVER_EMBED_CALL/DONE: documents per encode, corpus size, single-item
+     flag, length distributions and output rows.
+   - RETRIEVER_SEARCH: query size, requested k and candidate count.
+   - RETRIEVER_CACHE_SAVE/LOAD/LOAD_DONE: explicit cache hit/miss evidence.
+
+   Purpose: prove whether consolidation rebuilds the corpus through thousands of
+   add_documents([one_document]) calls on CPU.
+
+Equivalent insertion points
+---------------------------
+- There is no separate tokenizer wrapper in the Python client. Exact chat-template
+  tokenization occurs inside vLLM, so exact successful counts are logged from its
+  usage response at RobustVLLMController.get_completion_with_usage().
+- There is no active history object in answer_question(); retrieved memory context
+  is directly interpolated into the single user prompt. QA_PROMPT logs that path.
+- retrieve_memory_llm() exists but is not called by answer_question(). Diagnostics
+  therefore instrument find_related_memories_raw(), the active retrieval path.
+- sample_id is unavailable inside consolidate_memories()/SimpleEmbeddingRetriever;
+  SAMPLE_START and sequential stage markers provide the sample boundary without
+  changing signatures or state.
+
+Run exactly one LoCoMo sample
+-----------------------------
+The HPC scripts do not pass --ratio. To avoid modifying their parameters/control
+flow, create a temporary one-sample dataset and override DATASET_PATH at sbatch
+submission. This leaves the original dataset untouched.
+
+From the MemWeave repository root:
+
+  cd /home/jwcao/xingzhuo/slm_memory_agent/code/MemWeave
+
+  python -c "import json; src='data/locomo10.json'; dst='/tmp/locomo_sample0_qwen_compare.json'; data=json.load(open(src, encoding='utf-8')); json.dump(data[:1], open(dst, 'w', encoding='utf-8'), ensure_ascii=False); print(dst, len(data[:1]))"
+
+Use isolated ports and cache directories so the two runs cannot reuse/corrupt one
+another's state. Submit Qwen2.5:
+
+  sbatch --export=ALL,DATASET_PATH=/tmp/locomo_sample0_qwen_compare.json,PORT=30125,CACHE_DIR=/home/jwcao/xingzhuo/slm_memory_agent/code/MemWeave/hpc/cache/debug_qwen_compare_qwen25,RUN_NAME=debug_qwen_compare_qwen25 hpc/memweave-qwen25-locomo.sh
+
+Submit Qwen3:
+
+  sbatch --export=ALL,DATASET_PATH=/tmp/locomo_sample0_qwen_compare.json,PORT=30135,CACHE_DIR=/home/jwcao/xingzhuo/slm_memory_agent/code/MemWeave/hpc/cache/debug_qwen_compare_qwen3,RUN_NAME=debug_qwen_compare_qwen3 hpc/memweave-qwen3-2507-locomo.sh
+
+The default FORCE_REBUILD_CACHE value remains unchanged. Do not run both jobs on
+the same port.
+
+Reading the logs
+----------------
+Replace <JOBID> with the Slurm job ID.
+
+All comparison diagnostics:
+
+  grep -h '\[DEBUG_QWEN_COMPARE\]' hpc/logs/*-<JOBID>.out hpc/logs/*-<JOBID>.err
+
+Effective runtime and source paths:
+
+  grep -hE '\[DEBUG_QWEN_COMPARE\] (HPC_|DRIVER_ARGS|MODULE_PATHS|DATASET_LOADED|SAMPLE_)' hpc/logs/*-<JOBID>.out hpc/logs/*-<JOBID>.err
+
+Step 1/Step 2 sizes:
+
+  grep -hE '\[DEBUG_QWEN_COMPARE\] (STEP1_|STEP2_|PRESTORAGE_EMBED_)' hpc/logs/*-<JOBID>.out hpc/logs/*-<JOBID>.err
+
+QA prompt growth and exact vLLM usage/errors:
+
+  grep -hE '\[DEBUG_QWEN_COMPARE\] (QA_ID|QA_PROMPT|QA_EXCEPTION|LLM_CALL |LLM_HTTP_AFTER|LLM_HTTP_ERROR)' hpc/logs/*-<JOBID>.out hpc/logs/*-<JOBID>.err
+
+Retrieval expansion:
+
+  grep -hE '\[DEBUG_QWEN_COMPARE\] RETRIEVAL_(START|PRIMARY|NEIGHBOR|END)' hpc/logs/*-<JOBID>.out hpc/logs/*-<JOBID>.err
+
+Consolidation triggers:
+
+  grep -hE '\[DEBUG_QWEN_COMPARE\] CONSOLIDATE_(START|END)' hpc/logs/*-<JOBID>.out hpc/logs/*-<JOBID>.err
+
+Count consolidation and one-document embedding calls:
+
+  grep -h '\[DEBUG_QWEN_COMPARE\] CONSOLIDATE_START' hpc/logs/*-<JOBID>.out hpc/logs/*-<JOBID>.err | wc -l
+  grep -h '\[DEBUG_QWEN_COMPARE\] RETRIEVER_EMBED_CALL' hpc/logs/*-<JOBID>.out hpc/logs/*-<JOBID>.err | grep -c 'single_document_encode=True'
+
+Cache evidence:
+
+  grep -hE '\[DEBUG_QWEN_COMPARE\] (MEMORY_POPULATE_START|STEP1_CACHE_HIT|STEP2_CACHE_HIT|RETRIEVER_CACHE_)' hpc/logs/*-<JOBID>.out hpc/logs/*-<JOBID>.err
+
+Suggested comparison order
+--------------------------
+1. Compare HPC_CONFIG, DRIVER_ARGS, MODULE_PATHS and DATASET_LOADED.
+2. Compare SAMPLE_START and STEP1_RECORD counts/field length distributions.
+3. Compare STEP2 reasoning row/record counts and response lengths.
+4. Compare MEMORY_ADD/CONSOLIDATE counts and RETRIEVER_EMBED_CALL batch sizes.
+5. Compare RETRIEVAL_START expansion counts and RETRIEVAL_END context sizes.
+6. Compare QA_PROMPT estimates with LLM_HTTP_AFTER exact usage or 400 errors.
+
+How to remove the debug instrumentation
+---------------------------------------
+If these files are tracked in the user's source-control checkout, restore only the
+six modified source/script files (the command must be run from that checkout):
+
+  git restore -- \
+    hpc/memweave-qwen25-locomo.sh \
+    hpc/memweave-qwen3-2507-locomo.sh \
+    hpc/memweave_qwen25_3b_locomo_eval.py \
+    hpc/memweave_qwen25_3b_locomo_driver.py \
+    prestorage_pipeline.py \
+    memory_layer_robust.py \
+    memory_layer.py
+
+Then remove this documentation directory if it is no longer wanted:
+
+  rm -rf hpc/debug_qwen_compare
+
+If this project copy is not under Git, first locate all instrumentation with:
+
+  grep -RFn '\[DEBUG_QWEN_COMPARE\]' \
+    hpc/memweave-qwen25-locomo.sh \
+    hpc/memweave-qwen3-2507-locomo.sh \
+    hpc/memweave_qwen25_3b_locomo_eval.py \
+    hpc/memweave_qwen25_3b_locomo_driver.py \
+    prestorage_pipeline.py memory_layer_robust.py memory_layer.py
+
+Remove the complete adjacent print/logger blocks and the diagnostic-only local
+values used by those blocks. The diagnostic-only local names are:
+
+  question_preview, system_message, system_tokens_est, prompt_tokens_est,
+  context_tokens_est, session_count, turn_count, char_lengths, token_estimates,
+  expanded_count, cached_records, parsed_records
+
+Also change "except Exception as exc:" in answer_question() back to
+"except Exception:" after removing QA_EXCEPTION. This restores the original
+source behavior. Do not delete pre-existing non-prefixed operational logging.
+
+Verification performed
+----------------------
+- Python files were parsed with ast.parse without generating __pycache__.
+- Both HPC scripts passed bash -n.
+- No training/evaluation job was launched by this instrumentation change.

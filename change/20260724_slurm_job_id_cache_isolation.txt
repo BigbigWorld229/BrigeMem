@@ -1,0 +1,130 @@
+MemWeave Slurm Job ID 级缓存目录隔离修改记录
+================================================
+
+日期：2026-07-24（Asia/Shanghai）
+
+一、原问题
+
+运行入口：
+  hpc/memweave-qwen3-2507-locomo.sh
+
+原入口传给 Python driver 的缓存根目录为所有作业共享的：
+  hpc/cache/memweave_qwen3_4b_2507_locomo_eval/
+
+driver 再在该目录下追加 plain、llmlingua_r090_min24 等 cache tag。多个 Slurm
+作业使用相同配置时，会写入同一组 Step 1、Step 2、reasoning、JSONL、
+embedding、memory 和 retriever 文件。FORCE_REBUILD_CACHE=1 的完整重建清理
+虽然限定在传入目录中，但共享目录会使一个作业可能清理另一个作业的缓存。
+
+二、修改文件和位置
+
+1. hpc/memweave-qwen3-2507-locomo.sh
+
+修改位置：
+  - 输出目录说明注释。
+  - CACHE_DIR、JOB_ID、RESULT_DIR 初始化区。
+  - cleanup() 的 Job ID 日志。
+  - 启动配置打印区。
+  - Python driver 调用沿用 --cache-dir "$CACHE_DIR"。
+
+修改逻辑：
+  - 将原共享缓存目录保存为 CACHE_BASE_DIR。
+  - 保留原 CACHE_DIR 环境变量作为基础目录覆盖方式，并新增更明确的
+    CACHE_BASE_DIR 环境变量；CACHE_BASE_DIR 优先级更高。
+  - 使用已解析的 JOB_ID 构造：
+      JOB_CACHE_ROOT="$CACHE_BASE_DIR/job_$JOB_ID"
+  - 将运行时 CACHE_DIR 设置为 JOB_CACHE_ROOT，并只把该 Job 专属目录传给
+    Python driver。
+  - 启动时创建当前 Job 的缓存根目录。
+  - 启动配置明确打印：
+      Job ID
+      Cache base dir
+      Job cache root
+  - DEBUG_QWEN_COMPARE 的 HPC_CONFIG 和 SHELL_EXIT 使用实际 JOB_ID；手工运行时
+    也会打印 manual-<timestamp>-<pid>，不再显示 unset。
+
+2. test_ablation_independence.py
+
+修改测试函数：
+  - test_force_rebuild_preparation_is_scoped_to_current_job_cache()
+
+验证逻辑：
+  - 创建并列的 job_current/plain 和 job_other/plain。
+  - 在两个 Job 目录写入同名历史缓存。
+  - 对当前 Job 执行 prepare_force_rebuild()。
+  - 断言当前 Job 的 Step 1、Step 2、reasoning、final-note 及 embedding pickle
+    被清理。
+  - 断言另一个 Job 的同名缓存内容保持不变。
+  - 继续断言一次性清理不会删除本次运行随后生成的新缓存。
+
+3. prestorage_pipeline.py 和 hpc/memweave_qwen25_3b_locomo_driver.py
+
+本次无需修改。driver 已将传入的 --cache-dir 作为根目录，并只在其下追加
+cache tag；pipeline 的全部中间和最终缓存均相对该派生目录读写。因此 shell
+加入 Job ID 层后，已有完整重建逻辑自动限定到当前 Job。
+
+三、缓存目录结构
+
+默认基础目录：
+  /home/jwcao/xingzhuo/slm_memory_agent/code/MemWeave/hpc/cache/
+    memweave_qwen3_4b_2507_locomo_eval/
+
+Slurm 作业实际缓存根目录：
+  <CACHE_BASE_DIR>/job_<SLURM_JOB_ID>/
+
+手工运行实际缓存根目录：
+  <CACHE_BASE_DIR>/job_manual-<YYYYmmdd-HHMMSS>-<shell-pid>/
+
+driver 追加 cache tag 后的最终目录：
+  <CACHE_BASE_DIR>/job_<JOB_ID>/plain/
+  <CACHE_BASE_DIR>/job_<JOB_ID>/llmlingua_r090_min24/
+  <CACHE_BASE_DIR>/job_<JOB_ID>/<cache_tag>_step1_note_prompt_ablation/
+
+当前入口默认 LLMLINGUA_PRE_STEP1_COMPRESSION=false 且使用现有 Step 1 prompt，
+所以 Slurm Job 12345 的实际目录示例为：
+  /home/jwcao/xingzhuo/slm_memory_agent/code/MemWeave/hpc/cache/
+    memweave_qwen3_4b_2507_locomo_eval/job_12345/plain/
+
+四、当前 Job 目录内的缓存
+
+以下缓存全部位于当前 Job 的最终 cache-tag 目录：
+  - premem_step1_ours.jsonl
+  - premem_step1_embeddings_<model>.pkl
+  - premem_step1_id2index_<model>.pkl
+  - premem_step1_id2text_<model>.pkl
+  - premem_step1_session_pool_<model>.pkl
+  - premem_step2_ours_reasoning.jsonl
+  - premem_step2_embeddings_<model>.pkl
+  - premem_step2_id2index_<model>.pkl
+  - premem_step2_id2text_<model>.pkl
+  - premem_step2_session_pool_<model>.pkl
+  - premem_final_notes.jsonl
+  - memory_cache<ablation_suffix>_sample_<N>.pkl
+  - memory_cache<ablation_suffix>_sample_<N>.meta.json
+  - retriever_cache<ablation_suffix>_sample_<N>.pkl
+  - retriever_cache_embeddings<ablation_suffix>_sample_<N>.npy
+
+五、FORCE_REBUILD_CACHE 边界
+
+FORCE_REBUILD_CACHE=1 时：
+  - PreStoragePipeline.prepare_force_rebuild() 接收到的 cache_dir 已是当前
+    Job 的 <cache_tag> 子目录，只清理该目录的中间缓存。
+  - populate_agent_memory_from_prestorage() 的 memory/retriever 文件也基于同一个
+    Job 专属目录，只删除当前 Job 当前样本的最终缓存。
+  - 其他 job_<JOB_ID> 是兄弟目录，不会被遍历、读取、删除或覆盖。
+
+此前完成的 PRESTORAGE_CACHE_VERSION 移除、Step 1/Step 2 force 传播、完整重建
+以及 FORCE_REBUILD_CACHE=0 普通复用逻辑均保持不变。
+
+六、验证
+
+执行：
+  - bash -n hpc/memweave-qwen3-2507-locomo.sh
+  - /home/jwcao/miniconda3/envs/premem/bin/python -m unittest -v
+      test_ablation_independence.py
+
+结果：
+  - shell 语法检查通过。
+  - 6 个缓存与 A-Mem 回归测试全部通过。
+  - 静态检查确认 Job ID 路径计算、Job ID/缓存根目录打印和
+    --cache-dir "$CACHE_DIR" 参数传递均存在。

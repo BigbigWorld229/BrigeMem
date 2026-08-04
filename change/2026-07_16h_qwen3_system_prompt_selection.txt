@@ -1,0 +1,57 @@
+MemWeave Qwen3 system prompt 选择逻辑修改记录
+修改时间：2026-07-16 16时（Asia/Shanghai）
+
+一、修改范围
+仅修改模型类型识别、system prompt 选择和指定的 Qwen3 启动脚本。未修改任何 user prompt、Prompt 模板、输出解析、推理、检索、记忆构建、评测或成本统计逻辑。
+
+二、修改文件与具体内容
+
+1. memory_layer_robust.py
+
+- 新增常量 DEFAULT_SYSTEM_MESSAGE：保留修改前的原 system prompt，内容不变：
+  Follow the format specified in the prompt exactly. Do not add extra commentary.
+
+- 新增常量 QWEN3_SYSTEM_MESSAGE：保存 Qwen3 专用 system prompt：
+  Follow the format specified in the prompt exactly. Do not add extra commentary. Keep the output concise and rigorous, with a maximum length of 45,000 characters.
+
+- 新增函数 resolve_system_message(model_type)：
+  对 model_type 去除首尾空白并转为小写；值为 qwen3 时返回 QWEN3_SYSTEM_MESSAGE，其他所有值返回 DEFAULT_SYSTEM_MESSAGE。因此非 Qwen3 的既有行为保持不变。
+
+- 修改类 RobustBaseLLMController：
+  SYSTEM_MESSAGE 的类级默认值改为 DEFAULT_SYSTEM_MESSAGE；新增 _set_model_type(model_type)，同时保存模型类型并为当前控制器实例选择对应的 SYSTEM_MESSAGE。
+
+- 修改以下控制器的 __init__：
+  RobustOpenAIController
+  RobustOllamaController
+  RobustSGLangController
+  RobustVLLMController
+  RobustLiteLLMController
+  原直接赋值 self.model_type 的位置统一调用 _set_model_type(model_type)。各控制器原有请求、采样参数和返回解析均未改变。
+
+- 当前 Qwen3 LoCoMo 调用链：
+  启动脚本 --model-type qwen3
+  -> memweave_qwen25_3b_locomo_driver.py 的 args.model_type
+  -> PreStoragePipeline、Table1QwenAgent、RobustAgenticMemorySystem
+  -> RobustLLMController
+  -> 具体后端控制器实例
+  -> _set_model_type("qwen3")
+  -> 所有通过该实例 messages 字段发出的相关 LLM 请求使用 QWEN3_SYSTEM_MESSAGE。
+
+2. hpc/memweave-qwen3-2507-locomo.sh
+
+- 新增固定变量 MODEL_TYPE="qwen3"，明确标识本启动脚本使用 Qwen3。
+- Python Driver 参数由硬编码 --model-type qwen3 改为 --model-type "$MODEL_TYPE"。
+- 普通配置输出新增 Model type；DEBUG_QWEN_COMPARE 的 HPC_PATHS 输出新增 model_type，便于确认实际传入值。
+- 模型目录、served model name、vLLM 参数、user prompt、推理和评测命令的其他参数均未改变。
+
+三、行为结果
+
+- MODEL_TYPE/qwen model_type 为 qwen3：使用指定的 45,000 字符限制 system prompt。
+- qwen25、空值及其他 model_type：继续使用修改前的原 system prompt。
+
+四、验证
+
+- 使用 premem Conda 环境执行精确字符串和模型类型分支断言：通过。
+- memory_layer_robust.py 与 canonical Driver 的 Python 静态编译检查：通过。
+- hpc/memweave-qwen3-2507-locomo.sh 的 bash -n 语法检查：通过。
+- 未启动模型服务，未执行 LoCoMo 推理任务。

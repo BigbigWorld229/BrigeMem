@@ -1,0 +1,133 @@
+MemWeaveMine Step 1 Prompt conversation_time / speaker 变量补充记录
+
+时间：2026-08-04 10:19:02（Asia/Shanghai）
+项目：/home/jwcao/xingzhuo/slm_memory_agent/code/MemWeaveMine
+运行入口：hpc/memweave-qwen3-2507-locomo.sh
+
+一、目标与修改边界
+
+本次只补充 prestorage_pipeline.py 的 Step 1 Prompt 中以下两个变量的数据注入：
+
+Conversation time: {{$conversation_time}}
+Speaker: {{$speaker}}
+
+未修改 Step 1 Prompt 文本、{{$message}} 的原有构造、LLMLingua 压缩、metadata
+解析、note content、direct memory、检索、QA、成本统计、结果保存或入口参数。
+
+二、修改前现状
+
+1. 数据层已经完成所需字段提取，无需修改 load_dataset.py：
+
+- load_dataset.parse_conversation 从 conversation.session_N_date_time 读取 session 时间；
+- load_dataset.parse_session 将时间保存为 Session.date_time；
+- 每条 LoCoMo turn 的 speaker 字段保存为 Turn.speaker；
+- PreStoragePipeline._build_step1_records 已经逐 session / turn 访问
+  session.date_time 和 turn.speaker。
+
+2. STEP1_NOTE_PROMPT 已经包含 {{$conversation_time}} 和 {{$speaker}} 占位符。
+
+3. 缺口位于 PreStoragePipeline._extract_step1_metadata：修改前只执行
+   {{$message}} 替换，未接收或替换 conversation_time 和 speaker。
+
+4. 已生成的 Step 1 cache response 只记录 metadata_input，没有记录这两个 Prompt
+   变量，因此关闭 force rebuild 时，旧缓存无法识别需要用新变量重新提取 metadata。
+
+三、参考项目核对
+
+1. SimpleMem-main
+
+- test_locomo10.py 的 parse_conversation / parse_session 同样从
+  session_N_date_time 构造 Session.date_time，并从 turn.speaker 构造 Turn.speaker；
+- convert_to_dialogues 将 turn.speaker 作为 speaker、session.date_time 作为 timestamp；
+- hpc/simplemem_locomo_table6.py 也逐 session 读取 session_N_date_time，并逐 turn
+  使用 turn["speaker"]。
+
+2. LightMem-main
+
+- src/lightmem/memory_toolkits/memories/datasets/locomo.py 从 session_N_date_time
+  建立 session 时间，并从每条 message 的 speaker 字段建立 name / speaker tag；
+- hpc/lightmem_qwen3_4b_locomo_eval.py 的 extract_sessions 同样逐 session 提取时间，
+  逐 turn 提取 speaker_name。
+
+结论：两个参考项目均采用“session 级时间 + turn 级 speaker”。MemWeaveMine 当前
+load_dataset.py 已经采用等价结构，因此本次直接复用 session.date_time 和
+turn.speaker，没有新增另一套数据解析或时间格式转换。
+
+四、具体修改
+
+修改文件：prestorage_pipeline.py
+
+1. PreStoragePipeline._extract_step1_metadata
+
+- 新增只读关键字参数 conversation_time 和 speaker；
+- 在原 {{$message}} 替换之前，分别替换 {{$conversation_time}} 和 {{$speaker}}；
+- 注入值统一转换为字符串并去除首尾空白；
+- {{$message}} 仍使用原 metadata_input，未改变内容构造。
+
+2. PreStoragePipeline._build_step1_records
+
+- 调用 _extract_step1_metadata 时传入当前 session.date_time；
+- 同时传入当前 turn.speaker；
+- 在 Step1NoteRecord.response 中保存 conversation_time 和 speaker，便于缓存识别；
+- Session、Turn、Step1NoteRecord 的已有字段和其他处理保持不变。
+
+3. PreStoragePipeline._upgrade_cached_step1_rows
+
+- 从缓存行现有 session_date 和 role 字段恢复 conversation_time 和 speaker；
+- 比较 response 中缓存的 conversation_time / speaker 与当前值；
+- 旧缓存缺少任一字段或值不一致时，只重新执行原 Step 1 metadata 提取；
+- 刷新后的 response 写入两个字段，后续 cache hit 可直接复用；
+- 其他 cache upgrade 判断与内容保持不变。
+
+五、修改后的 Prompt 数据流
+
+data/locomo10.json
+  -> conversation.session_N_date_time
+  -> load_dataset.Session.date_time
+  -> PreStoragePipeline._build_step1_records 的 session.date_time
+  -> {{$conversation_time}}
+
+data/locomo10.json
+  -> conversation.session_N[*].speaker
+  -> load_dataset.Turn.speaker
+  -> PreStoragePipeline._build_step1_records 的 turn.speaker
+  -> {{$speaker}}
+
+每条 turn 的最终 Step 1 Prompt Input 现在包含：
+
+Conversation time: 当前 turn 所属 session 的 date_time
+Speaker: 当前 turn 的 speaker
+Message: 原有 metadata_input（保持原逻辑）
+
+六、验证结果
+
+1. Python / shell 静态检查
+
+- python -m py_compile prestorage_pipeline.py、load_dataset.py、driver.py、eval wrapper：通过；
+- bash -n hpc/memweave-qwen3-2507-locomo.sh：通过；
+- ruff F401/F821/F841 prestorage_pipeline.py：通过。
+
+2. 真实 LoCoMo 字段注入轻量测试
+
+- 使用 data/locomo10.json 的 sample 0、session 1、turn D1:1；
+- 实际 session.date_time：1:56 pm on 8 May, 2023；
+- 实际 turn.speaker：Caroline；
+- 捕获的 Step 1 Prompt 包含：
+  Conversation time: 1:56 pm on 8 May, 2023
+  Speaker: Caroline
+- Prompt 中不再残留 {{$conversation_time}} 或 {{$speaker}}：通过；
+- response 中保存两个变量：通过；
+- Step 1 JSONL 正常保存：通过。
+
+3. 旧缓存升级测试
+
+- 构造缺少 conversation_time / speaker response 字段的旧 Step 1 cache row；
+- _upgrade_cached_step1_rows 检测到缺失并重新调用 metadata 提取：通过；
+- 刷新 Prompt 使用 cache row 的 session_date / role：通过；
+- 刷新后的 response 写回两个字段：通过。
+
+七、未执行项
+
+未启动完整 GPU/vLLM LoCoMo 作业。完整模型输出质量与时间归一化效果需要后续 Slurm
+评测确认；本次已验证实际 LoCoMo 数据字段、Prompt 渲染、Step 1 JSONL 保存和旧缓存
+刷新路径，不涉及其他业务逻辑。

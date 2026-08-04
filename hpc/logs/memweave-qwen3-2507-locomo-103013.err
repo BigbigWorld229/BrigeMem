@@ -1,0 +1,16 @@
+2026-08-03 10:40:15,358 - INFO - Unified cost statistics enabled: /home/jwcao/xingzhuo/slm_memory_agent/code/MemWeaveMine/hpc/results/memweave_qwen3_4b_2507_locomo_eval_plain/job_103013/cost_statistics.jsonl
+2026-08-03 10:40:15,359 - INFO - Ablation component: llmlingua_pre_step1_compression=False
+2026-08-03 10:40:15,359 - INFO - Ablation component: locomo_category3_use_existing_prompt=True
+2026-08-03 10:40:15,359 - INFO - Ablation component: prestorage_step1_use_existing_note_prompt=True
+2026-08-03 10:40:15,391 - INFO - [DEBUG_QWEN_COMPARE] DRIVER_ARGS model=Qwen/Qwen3-4B-Instruct-2507 model_type=qwen3 backend=vllm dataset=/home/jwcao/xingzhuo/slm_memory_agent/code/MemWeaveMine/data/locomo10.json ratio=1.0 memory_build_mode=step1_prompt_only vllm_host=http://127.0.0.1 vllm_port=49112 embedding_model=/home/jwcao/xingzhuo/mimic_dataset_building/models/stella_en_400M_v5 cache_dir=/home/jwcao/xingzhuo/slm_memory_agent/code/MemWeaveMine/hpc/cache/memweave_qwen3_4b_2507_locomo_eval/job_103013 output=/home/jwcao/xingzhuo/slm_memory_agent/code/MemWeaveMine/hpc/results/memweave_qwen3_4b_2507_locomo_eval_plain/job_103013/results.json force_rebuild_cache=True cuda_visible_devices='' max_model_len_expected=8192
+2026-08-03 10:40:31,394 - INFO - HTTP Request: GET https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json "HTTP/1.1 200 OK"
+Traceback (most recent call last):
+  File "/home/jwcao/xingzhuo/slm_memory_agent/code/MemWeaveMine/hpc/memweave_qwen25_3b_locomo_eval.py", line 16, in <module>
+    main()
+  File "/home/jwcao/xingzhuo/slm_memory_agent/code/MemWeaveMine/hpc/memweave_qwen25_3b_locomo_driver.py", line 827, in main
+    modules = import_repo_modules(repo_root, args.embedding_model_dir.resolve())
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jwcao/xingzhuo/slm_memory_agent/code/MemWeaveMine/hpc/memweave_qwen25_3b_locomo_driver.py", line 273, in import_repo_modules
+    "parse_relevant_parts": parse_relevant_parts,
+                            ^^^^^^^^^^^^^^^^^^^^
+NameError: name 'parse_relevant_parts' is not defined

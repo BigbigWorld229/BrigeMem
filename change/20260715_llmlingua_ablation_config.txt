@@ -1,0 +1,44 @@
+MemWeave LLMLingua 消融配置变更记录
+====================================
+
+日期：2026-07-15
+
+一、新增文件
+
+1. ablation_config.json
+   - 新增可扩展的顶层 components 对象，供后续继续加入其他消融组件。
+   - 当前配置项：components.llmlingua_pre_step1_compression。
+   - true：启动脚本向 Python 入口传入 --enable-precompress 及 LLMLingua 参数，正常执行 Step 1 前压缩。
+   - false：启动脚本不传入 --enable-precompress，LLMLinguaTurnCompressor 保持 disabled；现有
+     build_step1_record() 路径会令 compress_text 等于对应原始 turn.text，后续 Step 1 metadata、
+     note content 和 embedding 构建继续使用该原文，其他流程不变。
+
+二、修改文件
+
+1. hpc/memweave-qwen25-locomo.sh
+   - 新增 ABLATION_CONFIG 路径变量，默认读取仓库根目录下的 ablation_config.json；允许通过同名
+     环境变量指定其他消融配置文件。
+   - 使用 Python 标准库 json 严格读取 components.llmlingua_pre_step1_compression。
+   - 配置文件缺失、JSON 非法、components 不是对象、配置项缺失或不是 JSON boolean 时，脚本
+     输出明确错误并以状态码 2 退出，避免隐式猜测配置。
+   - 将合法布尔值映射到现有 PRECOMPRESS=1/0 分支，保留原有参数组装、运行 variant 和缓存
+     tag 行为：true 使用 precompress/llmlingua_*，false 使用 plain/plain。
+   - 在常规日志和 DEBUG_QWEN_COMPARE HPC_RUNTIME 日志中记录配置路径及解析后的开关值。
+
+三、未修改的相关代码及原因
+
+1. precompression.py
+   - 无需修改。LLMLinguaTurnCompressor(enabled=False) 已明确返回原始 text，并把同一原文写入
+     Step1MessageRecord.original_text、compress_text 和 memory_content。
+
+2. prestorage_pipeline.py
+   - 无需修改。所有后续 Step 1 metadata、note content、缓存和 embedding 位置统一读取
+     Step1MessageRecord.compress_text；关闭压缩时该字段已是原始 turn.text。
+
+3. hpc/memweave_qwen25_3b_locomo_driver.py
+   - 无需修改。现有 --enable-precompress 参数和 build_turn_compressor_from_args() 已完整承接开关。
+
+四、范围
+
+- 仅修改指定 Qwen2.5 LoCoMo 启动脚本；其他模型和 test_model_diff 启动脚本未修改。
+- 未修改记忆生成、预存储推理、A-Mem 组织/更新、检索、问答或评测逻辑。

@@ -1,0 +1,87 @@
+MemWeave Qwen3-2507 LoCoMo 消融配置与 LLMLingua 对齐变更记录
+================================================================
+
+时间：2026-07-16 20:28 CST
+
+一、涉及文件
+
+1. 参考文件（读取，未修改）
+   - hpc/memweave-qwen25-locomo.sh
+
+2. 修改文件
+   - hpc/memweave-qwen3-2507-locomo.sh
+
+3. 新增记录文件
+   - change/20260716_20h_qwen3_ablation_llmlingua_alignment.txt
+
+二、修改的函数及具体内容
+
+1. 新增 shell 函数 append_llmlingua_args()
+   - 与 Qwen2.5 脚本中的同名函数保持一致。
+   - 函数接收 ablation_config.json 中
+     components.llmlingua_pre_step1_compression 的 true/false 值。
+   - true：要求 LLMLINGUA_MODEL_DIR 非空且目录真实存在；校验通过后向 EXTRA_ARGS
+     追加 --enable-precompress、--llmlingua-model-dir、--llmlingua-device、
+     --llmlingua-rate、--llmlingua-target-token 和 --llmlingua-min-tokens。
+   - false：不追加 LLMLingua 参数，Step 1 使用未压缩原文。
+   - 非 true/false 值：返回状态码 2，拒绝无效开关。
+
+2. 脚本顶层消融配置解析
+   - 新增 prestorage_step1_use_existing_note_prompt 必需组件及缺失检查，使 Qwen3
+     与 Qwen2.5 均校验五个消融组件。
+   - 将 llmlingua_pre_step1_compression 的原始值保存到
+     LLMLINGUA_PRE_STEP1_COMPRESSION。
+   - 使用 case 严格接受 true 或 false，并分别映射为 PRECOMPRESS=1 或 0；其他值
+     立即以状态码 2 退出，不再将拼写错误等非法值静默当作 false。
+
+3. 脚本顶层启动参数组装
+   - 将 EXTRA_ARGS 初始化、--force-rebuild-cache 追加和 append_llmlingua_args 调用
+     移到启动 vLLM 之前。
+   - 配置值非法、LLMLINGUA_MODEL_DIR 为空或目录不存在时，现在会在占用 GPU、启动
+     vLLM 服务之前失败。
+   - 删除原先“PRECOMPRESS=1 但模型目录为空时退回原文”的宽松分支，保证配置为
+     true 时必须真正启用 LLMLingua。
+
+4. 日志输出
+   - LLMLingua 开关日志改为打印配置中的 true/false 原始值。
+   - HPC_RUNTIME 日志加入 llmlingua_pre_step1_compression=<true|false>，并保持
+     Qwen3 实际 max_model_len=16384。
+   - 恢复统一的 HPC_MAX_TOKENS 调试日志，QA 上限继续显示 Qwen3 脚本设置的 256。
+
+三、对齐后的状态
+
+Qwen3 与 Qwen2.5 脚本目前在以下行为上保持一致：
+
+1. 使用同一个 ablation_config.py 读取 ablation_config.json。
+2. 校验相同的五个必需消融组件。
+3. 严格校验 llmlingua_pre_step1_compression 只能为 true 或 false。
+4. 使用相同的 append_llmlingua_args() 实现和 LLMLingua 参数集合。
+5. 启用压缩时要求 LLMLingua 模型目录非空且存在。
+6. 在启动 vLLM 前完成 EXTRA_ARGS 构造和所有相关校验。
+
+四、修改后仍保留的脚本差异
+
+1. 模型：Qwen2.5-3B-Instruct 与 Qwen3-4B-Instruct-2507。
+2. Qwen3 额外设置 MODEL_TYPE=qwen3，并向 Python 入口传入 --model-type。
+3. Qwen3 固定 SAMPLE_RATIO=0.5，并传入 --ratio；Qwen2.5 不限制采样比例。
+4. Qwen3 固定 MEMWEAVE_MAX_TOKENS_QA_ANSWER_GENERATION=256；Qwen2.5 未在脚本
+   中强制设置 QA 生成上限。
+5. vLLM 最大上下文长度分别为 16384 和 8192。
+6. 默认端口分别为 30005 和 30000。
+7. RUN_NAME、缓存目录、Slurm 作业名及日志文件名按各自模型区分。
+8. Qwen3 的项目根目录可由 MEMWEAVE_ROOT 覆盖；Qwen2.5 使用固定 ROOT。
+9. Qwen3 定义了 SCRIPT_DIR，但当前未在后续流程中使用。
+10. 两者仍复用 hpc/memweave_qwen25_3b_locomo_eval.py 作为 Python 入口。
+
+五、验证结果
+
+1. bash -n hpc/memweave-qwen25-locomo.sh：通过。
+2. bash -n hpc/memweave-qwen3-2507-locomo.sh：通过。
+3. ablation_config.py 成功解析默认配置，五个必需组件均存在且当前均为 true。
+4. 默认 LLMLINGUA_MODEL_DIR 目录存在。
+5. 修改后 diff 确认两个脚本的消融组件解析、严格布尔映射、
+   append_llmlingua_args() 实现和启动前参数构造已经一致。
+6. 将 LLMLINGUA_MODEL_DIR 指向不存在的测试目录执行 Qwen3 脚本，脚本在启动
+   vLLM 前按预期以状态码 2 退出，并报告 LLMLingua model directory not found。
+7. 本次未提交 Slurm 作业，也未实际启动 vLLM；验证范围为配置解析、路径检查、
+   Bash 静态语法和代码差异核对。

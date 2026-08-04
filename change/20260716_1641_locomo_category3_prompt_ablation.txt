@@ -1,0 +1,53 @@
+MemWeave LoCoMo Category 3 Prompt 消融变更记录
+================================================
+
+时间：2026-07-16 16:41 CST
+
+一、配置文件
+
+1. ablation_config.json
+   - 在现有 components 对象中新增布尔项 locomo_category3_use_existing_prompt，默认 true。
+   - true：Category 3 保持原逻辑，继续使用非 Category 2、5 的 else 分支 Prompt。
+   - false：仅 Category 3 使用结合上下文与外部事实或常识的新 Prompt。
+   - 继续沿用可扩展的 components 布尔项结构。
+
+2. ablation_config.py
+   - 新增 LOCOMO_CATEGORY3_EXISTING_PROMPT 常量，值为
+     locomo_category3_use_existing_prompt。
+   - 现有配置文件、components 结构和 JSON boolean 严格校验逻辑不变。
+
+二、启动脚本
+
+1. hpc/memweave-qwen25-locomo.sh
+   - 新增 CATEGORY3_PROMPT_COMPONENT，并检查配置中必须存在对应布尔项。
+   - 继续使用通用 components 遍历，在运行开始时打印包括新开关在内的全部消融项及布尔值。
+   - 配置路径与其他组件一样通过 --ablation-config 传给 Python driver。
+
+三、必要代码
+
+1. hpc/memweave_qwen25_3b_locomo_driver.py
+   - 导入 LOCOMO_CATEGORY3_EXISTING_PROMPT。
+   - main() 通过 AblationConfig.require() 读取新配置，并在构造 Table1QwenAgent 时传入。
+   - Table1QwenAgent.__init__() 新增 use_existing_category3_prompt 参数，默认 true。
+   - Table1QwenAgent.answer_question() 在原 Category 2 分支之后新增：
+     category == 3 and not self.use_existing_category3_prompt。
+   - 该新增分支使用以下 Prompt，temperature 保持原 Category 3 的 0.7：
+     Based on the context: {context}, write an answer in the form of a short phrase for the following
+     question. Answer by combining information from the context with relevant external facts or general
+     knowledge.\n\nQuestion: {question} Short answer:
+   - Category 5、Category 2 以及 Category 1/4 的既有分支、Prompt、温度和后续处理均未修改。
+
+四、验证
+
+1. python -m py_compile：配置加载器、prestorage pipeline、driver 和 eval 入口通过。
+2. bash -n hpc/memweave-qwen25-locomo.sh：通过。
+3. 默认配置解析成功并输出四个布尔消融项。
+4. premem Conda 环境下执行无模型 Prompt 断言测试通过：
+   - Category 3 / true 与原 else Prompt 逐字符一致；
+   - Category 3 / false 与需求指定 Prompt 逐字符一致；
+   - Category 1、2、4、5 在开关 true/false 时的 Prompt 和 temperature 完全相同。
+
+五、范围
+
+- 未修改检索、记忆、A-Mem、问答生成调用、输出解析、评测指标或其他题型逻辑。
+- 未启动 vLLM，也未执行完整 LoCoMo 作业；完成了静态检查和不依赖模型服务的精确 Prompt 测试。

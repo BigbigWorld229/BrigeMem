@@ -1,0 +1,110 @@
+MemWeave unified incremental cost statistics changes
+Date: 2026-07-15
+
+Scope
+-----
+Only cost collection, incremental persistence, cost output paths, the cost
+enable switch, directly related shell wiring, and cost tests were changed.
+Inference, retrieval ranking/expansion, prompts, answer generation, and metric
+calculation behavior were not changed.
+
+1. cost_profiler.py
+-------------------
+- CostProfiler.__init__
+  - Added one internal TokenUsageTracker. The former default operation/token
+    totals and stage profiler records are now controlled by CostProfiler.enabled.
+- CostProfiler.record_llm_call
+  - Continues to retain successful and failed stage-level call records.
+  - Successful calls now also update the internal legacy-compatible operation
+    totals, replacing the canonical driver's separate per-sample trackers.
+- CostProfiler.token_statistics
+  - Added the former token_statistics output structure: summary,
+    lightmem_style, and llm operation/stage aggregates.
+- CostProfiler.conversation_memory_build_summary
+  - Added per-conversation summaries restricted to PREMem Step 1, A-Mem after
+    Step 1, PREMem Step 2, and A-Mem after Step 2 stages.
+- CostProfiler.qa_cost_summary
+  - Added per-QA retrieval/answer wall time, vector retrieval time, retrieval
+    LLM call counts, success/failure counts, and input/output/total tokens.
+- IncrementalCostWriter
+  - Added a single append-only JSONL writer.
+  - Every event is serialized in one write and followed by flush and fsync so
+    all earlier completed events remain durable after process/node termination.
+- Removed the former CostProfiler.save three-file output path from the active
+  implementation. The canonical output is now one JSONL file.
+
+2. hpc/memweave_qwen25_3b_locomo_driver.py
+------------------------------------------
+- parse_args
+  - Replaced --enable-cost-profiling and --cost-profile-output with the single
+    --cost-profiling {on,off} option. Default is on.
+- Table1QwenAgent.__init__ / get_token_statistics
+  - Removed canonical use of a separate per-agent TokenUsageTracker.
+  - Legacy-compatible token totals now come from CostProfiler.token_statistics.
+- Table1QwenAgent.answer_question
+  - Added statistics-only qa_retrieval_total and qa_answer_total wall timers.
+  - Prompt, retrieval, model calls, parsing, and returned values are unchanged.
+- build_result_payload
+  - Removed token_statistics from the normal QA result/checkpoint JSON so all
+    merged cost outputs live in the independent job cost file.
+  - Removed precompression.stats from the normal QA result/checkpoint JSON while
+    retaining the non-cost precompression configuration. The complete
+    precompression statistics are included in final_summary in the cost file.
+- aggregate_qa_cost_batch
+  - Added aggregation for ten-QA checkpoints and the final remainder.
+- main
+  - Derives <job result directory>/cost_statistics.jsonl from --output.
+  - Starts the cost file before model/data work.
+  - Writes conversation_memory_build_completed immediately after each memory
+    build returns.
+  - Writes qa_completed immediately after each QA inference returns, before
+    evaluation/result checkpoint work.
+  - Writes qa_batch_checkpoint every ten completed QAs.
+  - Writes a final-remainder checkpoint and final_summary on normal completion.
+  - final_summary contains both the former overall token_statistics and the
+    full CostProfiler stage snapshot.
+  - Removed the former optional three-file profiler save and result-JSON
+    cost_profiling embedding.
+
+Cost JSONL event types
+----------------------
+- run_started
+- conversation_memory_build_completed
+- qa_completed
+- qa_batch_checkpoint (interval or final_remainder)
+- final_summary
+
+3. HPC shell scripts
+--------------------
+Modified:
+- hpc/memweave-qwen25-locomo.sh
+- hpc/memweave-qwen3-2507-locomo.sh
+- hpc/memweave-qwen35-locomo.sh
+- hpc/test_model_diff/memweave-qwen3-2507-locomo-1sample.sh
+- hpc/test_model_diff/memweave-qwen3-2507-locomo-1sample-prememqwen.sh
+
+Changes:
+- Added the single COST_PROFILING environment setting, default on.
+- Passes it only through --cost-profiling on/off.
+- Reports the job-local cost_statistics.jsonl path.
+- Updated output comments that previously said token statistics were embedded
+  in results.json.
+
+4. test_cost_profiler.py
+------------------------
+- Added checks that successful calls populate the merged legacy-compatible
+  token totals.
+- Added per-QA retrieval/answer time and retrieval LLM token/call assertions.
+- Replaced the old three-file save test with a single durable JSONL writer test.
+
+Validation performed
+--------------------
+- python -m unittest -v test_cost_profiler.py
+  - 6 tests passed.
+- python -m py_compile cost_profiler.py
+  hpc/memweave_qwen25_3b_locomo_driver.py test_cost_profiler.py
+  - passed.
+- bash -n on all five modified HPC shell scripts
+  - passed.
+
+No full model/LoCoMo execution was performed.

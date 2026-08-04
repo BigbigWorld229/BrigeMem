@@ -1,0 +1,162 @@
+MemWeaveMine A-Mem 消融开关独立性修复记录
+=======================================
+
+日期：2026-07-24（Asia/Shanghai）
+
+一、原问题
+
+启动入口：
+  hpc/memweave-qwen3-2507-locomo.sh
+
+该入口已将以下两个开关正确传递给 Python driver：
+  - amem_after_step1_update_and_evolution
+  - amem_after_step2_update_and_evolution
+
+但 prestorage_pipeline.populate_agent_memory_from_prestorage() 的原控制流在
+enable_amem_after_step1=False 时：
+  1. 直接构造 passive Step 1 memories；
+  2. 保存 memory/retriever cache；
+  3. 打印硬编码 step2_records=0；
+  4. 立即 return。
+
+因此 Step 1 A-Mem 开关错误地同时阻断了：
+  - Step 1 embedding artifact；
+  - premem_step2_reasoning；
+  - Step 2 embedding artifact；
+  - Step 2 direct memory 写入；
+  - Step 2 A-Mem 更新与演化。
+
+此外，Table1QwenAgent.retrieve_memory() 原先只根据 Step 1 A-Mem 开关选择是否
+执行 A-Mem link expansion。在 Step 1 A-Mem 关闭、Step 2 A-Mem 开启时，即使
+Step 2 A-Mem 已构建关系，QA 检索仍会被错误地强制为无 link expansion 的直接检索。
+
+二、修改文件和函数
+
+1. prestorage_pipeline.py
+
+修改函数：
+  - populate_agent_memory_from_prestorage()
+  - find_direct_step1_memories_raw()（仅更新 docstring，使其准确描述混合 direct records）
+
+修改内容：
+  - 删除 enable_amem_after_step1=False 分支末尾的提前 return。
+  - Step 1 memory 写入改为独立二选一：
+      true  -> 保持原有 agent.add_memory()/A-Mem add_note()/process_memory()。
+      false -> 保持原有 populate_direct_step1_memory()，只跳过 Step 1 A-Mem。
+  - 无论 Step 1 A-Mem 开关为何值，均继续执行：
+      _save_step1_embedding_artifacts()
+      _build_step2_records()
+      _save_step2_embedding_artifacts()
+  - Step 2 memory 写入只由 enable_amem_after_step2 决定：
+      true  -> add_step2_records_to_agent()，执行 Step 2 A-Mem。
+      false -> add_direct_step2_records_to_agent()，直接写入 Step 2 records。
+  - memory cache metadata 分别记录两个开关的真实值。
+  - MEMORY_POPULATE_END 日志改为输出实际 step1_memory_mode、真实
+    step2_records 数量及两个 A-Mem 开关，移除硬编码 step2_records=0。
+  - PRESTORAGE_CACHE_VERSION 从 5 提升到 6。旧版本缓存可能记录
+    Step 2 A-Mem=true，但实际因旧提前返回而不包含 Step 2 records；提升版本可防止
+    FORCE_REBUILD_CACHE 关闭时继续复用旧错误缓存。
+
+2. hpc/memweave_qwen25_3b_locomo_driver.py
+
+修改类/函数：
+  - Table1QwenAgent.__init__()
+  - Table1QwenAgent.retrieve_memory()
+  - main() 中 Table1QwenAgent 构造调用
+
+修改内容：
+  - 将 enable_amem_after_step2 传入并保存在 Table1QwenAgent。
+  - QA 检索仅在两个 A-Mem 阶段都关闭时使用 direct/no-link-expansion 路径。
+  - 任一 A-Mem 阶段开启时使用 find_related_memories_raw()，使 Step 2 A-Mem
+    产生的关系不再被 Step 1 开关屏蔽。
+  - AGENT_INIT 日志增加两个 A-Mem 开关和 amem_link_expansion 的最终状态。
+
+3. test_ablation_independence.py（新增）
+
+新增无模型单元测试：
+  - 覆盖 Step 1/Step 2 A-Mem 的四种布尔组合。
+  - 断言所有组合都会构建 Step 2。
+  - 断言 Step 1 A-Mem 调用只由 Step 1 开关决定。
+  - 断言 Step 2 A-Mem 调用只由 Step 2 开关决定。
+  - 断言 direct/A-Mem Step 1 和 Step 2 memories 均按各自开关写入。
+  - 断言 cache metadata 保存两个开关的独立真实值和新缓存版本。
+  - 断言 Step 1 A-Mem=false、Step 2 A-Mem=true 时启用 link-expansion 检索。
+  - 断言仅在两个 A-Mem 开关都为 false 时使用 direct retrieval。
+
+4. change/20260724_amem_ablation_switch_independence.txt
+
+本变更记录。
+
+三、修复后的主要组合
+
+Step 1 A-Mem  Step 2 A-Mem  Step 1 memory  premem_step2  Step 2 memory
+--------------- --------------- -------------- ------------- -----------------
+false           false           direct         执行          direct
+false           true            direct         执行          A-Mem
+true            false           A-Mem          执行          direct
+true            true            A-Mem          执行          A-Mem
+
+重点目标组合：
+  Step 1 A-Mem=false、Step 2 A-Mem=true
+
+修复后执行顺序：
+  1. Step 1 信息抽取；
+  2. direct Step 1 memory 写入，不执行 Step 1 A-Mem；
+  3. Step 1 embedding；
+  4. premem_step2_reasoning；
+  5. Step 2 embedding；
+  6. Step 2 records 调用 A-Mem add_note()/process_memory()；
+  7. QA 检索允许使用 A-Mem link expansion。
+
+四、其他消融开关独立性检查
+
+1. llmlingua_pre_step1_compression
+   - 只控制 Step 1 之前的 turn compression 及对应 cache tag。
+   - 未发现其阻断 A-Mem、Step 2、Prompt 或 QA 的同类耦合。
+
+2. locomo_category3_use_existing_prompt
+   - 只在 Category 3 answer prompt 的两个模板之间选择。
+   - 不控制记忆构建、检索或其他 category。
+
+3. prestorage_step1_use_existing_note_prompt
+   - 只选择 Step 1 metadata extraction prompt，并影响对应 cache tag。
+   - 不控制 Step 1/Step 2 是否执行。
+
+上述三个开关未修改。
+
+五、验证
+
+1. 静态编译：
+   /home/jwcao/miniconda3/bin/python -m py_compile \
+     prestorage_pipeline.py \
+     hpc/memweave_qwen25_3b_locomo_driver.py \
+     test_ablation_independence.py
+   结果：通过。
+
+2. 新增独立性测试：
+   /home/jwcao/miniconda3/bin/python -m unittest -v test_ablation_independence.py
+   结果：3/3 通过。
+
+3. 原有成本统计测试：
+   /home/jwcao/miniconda3/bin/python -m unittest -v test_cost_profiler.py
+   结果：6/6 通过。
+
+4. 启动脚本使用的 premem Conda 环境：
+   env HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+     /home/jwcao/miniconda3/envs/premem/bin/python \
+     -m unittest -v test_ablation_independence.py test_cost_profiler.py
+   结果：9/9 通过。
+
+5. 全量 unittest discovery：
+   - 新增测试及成本统计测试通过。
+   - 既有 test_advanced.py/test_advanced_robust.py 在测试发现导入阶段尝试从
+     huggingface.co 加载 all-MiniLM-L6-v2；当前运行环境无外网，最终超时。
+   - 该限制与本次修改无关，未通过安装依赖或修改网络/项目配置绕过。
+
+六、范围
+
+- 未修改启动脚本中的消融值。
+- 未修改 Prompt 文本。
+- 未修改 LLMLingua 算法、Step 1 信息抽取、Step 2 推理算法、A-Mem 内部处理、
+  数据加载、问答生成、评测指标或成本统计逻辑。
+- 未启动 vLLM，也未提交完整 LoCoMo HPC 作业。

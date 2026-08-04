@@ -1,0 +1,172 @@
+MemWeaveMine Step 1 Prompt-only 流程精简修改记录
+
+日期：2026-08-01
+项目：/home/jwcao/xingzhuo/slm_memory_agent/code/MemWeaveMine
+目标入口：hpc/memweave-qwen3-2507-locomo.sh
+
+一、修改范围
+
+本次仅调整目标 Qwen3-2507 入口实际经过的 memory build 路径，使其在 Step 1 Prompt 提取完成、直接记忆和检索缓存保存后结束 memory build，然后继续原有 LoCoMo QA。未修改 Step 1 Prompt 文本、Step 1 提取实现、QA Prompt、QA 推理、检索排序、指标计算、结果检查点或成本统计实现。
+
+修改文件：
+
+1. hpc/memweave-qwen3-2507-locomo.sh
+   - 固定 MEMORY_BUILD_MODE=step1_prompt_only。
+   - 删除目标入口的两项 A-Mem shell 变量、布尔校验、日志和 CLI 参数。
+   - 删除目标入口日志中仅对应 Step 2、memory evolution 的 max-token 配置展示。
+   - 保留 LLMLingua、Category 3 Prompt、Step 1 Note Prompt、缓存、结果和成本参数。
+
+2. hpc/memweave_qwen25_3b_locomo_driver.py
+   - parse_args：新增 --memory-build-mode；prompt-only 不再要求两项 A-Mem CLI 参数，legacy_full 仍要求显式提供，保持旧入口约束。
+   - Table1QwenAgent.__init__ / retrieve_memory：记录 memory_build_mode；prompt-only 强制使用 find_direct_step1_memories_raw，不允许 A-Mem link expansion。
+   - build_or_load_memories：向 prestorage pipeline 传递 memory_build_mode。
+   - build_result_payload：结果增加 memory_build_mode；prompt-only 的 ablation.components 不再写入两项 A-Mem 字段。
+   - main：prompt-only 将两项内部 A-Mem enable 值固定为 False，并把模式传入 agent 和 memory build。
+
+3. prestorage_pipeline.py
+   - 新增 MEMORY_BUILD_MODE_LEGACY 和 MEMORY_BUILD_MODE_STEP1_PROMPT_ONLY 常量。
+   - PreStoragePipeline.prepare_force_rebuild：prompt-only 只清理仍会重建的 Step 1 JSONL；legacy_full 保持原有全部 prestorage artifact 清理。
+   - populate_agent_memory_from_prestorage：新增模式校验、prompt-only 独立缓存后缀和元数据。
+   - populate_agent_memory_from_prestorage：在 _build_step1_records 后调用 populate_direct_step1_memory，保存 memory/retriever cache，然后立即 return。
+   - prompt-only return 位于 Step 1 A-Mem、Step 1 embedding artifacts、Step 2 records、Step 2 embedding artifacts、Step 2 memory add 之前。
+   - legacy_full 分支及其 A-Mem 消融独立性逻辑保留，避免影响其他共享入口。
+
+4. test_ablation_independence.py
+   - Fake pipeline 支持 memory_build_mode。
+   - 新增 prompt-only CLI 参数测试。
+   - 新增 prompt-only force rebuild 范围测试。
+   - 新增 prompt-only 调用不可达、独立缓存、缓存复用和 direct QA retrieval 测试。
+   - 更新 legacy cache metadata 断言，验证旧四种 A-Mem 组合仍正常。
+
+未修改文件：
+
+- hpc/memweave_qwen25_3b_locomo_eval.py：仍作为目标 shell 的实际 Python wrapper，继续调用 driver.main。
+- Prompt 定义、Step 1 提取函数、QA Prompt、cost_profiler.py 以及其他入口脚本均未修改。
+
+二、原有执行流程
+
+hpc/memweave-qwen3-2507-locomo.sh
+-> hpc/memweave_qwen25_3b_locomo_eval.py
+-> hpc/memweave_qwen25_3b_locomo_driver.main
+-> build_or_load_memories
+-> populate_agent_memory_from_prestorage
+-> PreStoragePipeline._build_step1_records
+-> Step 1 A-Mem 或 direct Step 1 memory
+-> _save_step1_embedding_artifacts
+-> _build_step2_records
+-> _save_step2_embedding_artifacts
+-> Step 2 A-Mem 或 direct Step 2 memory
+-> memory/retriever cache
+-> Table1QwenAgent.answer_question / retrieve_memory
+-> QA 结果、检查点、指标和成本文件。
+
+目标入口原配置为 Step 1 A-Mem 关闭、Step 2 A-Mem 开启，因此 Step 1 后仍会生成 Step 1 embedding、执行完整 Step 2 并进入 Step 2 A-Mem。
+
+三、具体修改内容与目的
+
+1. 使用显式模式而不是复用 A-Mem 开关。
+   目的：A-Mem 开关只能决定 add/evolution 方式，不能阻止 Step 2 pipeline；step1_prompt_only 直接定义目标调用边界。
+
+2. 在 Step 1 records 后建立 DirectStep1Memory 并早返回。
+   目的：保留 QA 所需的 memory_system.memories 和 retriever.corpus，同时从控制流上使后续 A-Mem/Step 2 调用不可达。
+
+3. 使用 _step1_prompt_only 缓存后缀和仅含 memory_build_mode 的 metadata。
+   目的：不误加载历史 legacy/Step 2 memory cache，并移除目标模式中已经无意义的 A-Mem cache metadata 字段。
+
+4. prompt-only force rebuild 只处理有效缓存。
+   目的：重建 premem_step1_ours.jsonl、prompt-only memory cache 和 retriever cache，不触碰已不参与该模式的 Step 1 embedding、Step 2 JSONL、Step 2 embedding、final notes artifacts。
+
+5. QA retrieval 按模式选择 direct retrieval。
+   目的：即使共享代码中的 legacy A-Mem 参数存在，也不能让 prompt-only QA 进入 find_related_memories_raw 或 link expansion。
+
+6. 共享 legacy_full 路径保持原状。
+   目的：最小化修改范围，不删除公共函数，不改变 qwen25 等其他调用方的既有 A-Mem/Step 2 行为。
+
+四、修改后的目标执行流程
+
+hpc/memweave-qwen3-2507-locomo.sh
+-> --memory-build-mode step1_prompt_only
+-> wrapper main
+-> driver.main
+-> build_or_load_memories
+-> populate_agent_memory_from_prestorage
+-> 命中 prompt-only memory/retriever cache时直接加载；否则执行：
+   -> PreStoragePipeline._build_step1_records
+   -> 原有输入准备与可选 LLMLingua 压缩
+   -> 原有 Step 1 Prompt 调用与解析
+   -> premem_step1_ours.jsonl 保存
+   -> populate_direct_step1_memory
+   -> memory_cache_step1_prompt_only_sample_N.pkl
+   -> memory_cache_step1_prompt_only_sample_N.meta.json
+   -> retriever_cache_step1_prompt_only_sample_N.pkl
+   -> retriever_cache_embeddings_step1_prompt_only_sample_N.npy
+   -> return，结束 memory build
+-> Table1QwenAgent.retrieve_memory 使用 find_direct_step1_memories_raw
+-> 原有 relevance filter、QA Prompt、答案生成、指标、检查点、results.json 和 cost_statistics.jsonl。
+
+该路径不会调用：agent.add_memory 的 Step 1 A-Mem 路径、_save_step1_embedding_artifacts、_build_step2_records、_save_step2_embedding_artifacts、add_step2_records_to_agent、add_direct_step2_records_to_agent。
+
+五、移除或失效的参数、缓存和输出字段
+
+目标 Qwen3 shell 已移除：
+
+- AMEM_STEP1_COMPONENT
+- AMEM_STEP2_COMPONENT
+- AMEM_AFTER_STEP1_UPDATE_AND_EVOLUTION
+- AMEM_AFTER_STEP2_UPDATE_AND_EVOLUTION
+- --amem-after-step1-update-and-evolution
+- --amem-after-step2-update-and-evolution
+
+prompt-only 不再生成或消费：
+
+- premem_step1_embeddings_*.pkl
+- premem_step1_id2index_*.pkl
+- premem_step1_id2text_*.pkl
+- premem_step1_session_pool_*.pkl
+- premem_step2_ours_reasoning.jsonl
+- premem_step2_embeddings_*.pkl
+- premem_step2_id2index_*.pkl
+- premem_step2_id2text_*.pkl
+- premem_step2_session_pool_*.pkl
+- premem_final_notes.jsonl
+- legacy memory/retriever cache 中的 Step 2 memories 和 A-Mem links。
+
+prompt-only 输出不再包含：
+
+- results.json 的 ablation.components.amem_after_step1_update_and_evolution
+- results.json 的 ablation.components.amem_after_step2_update_and_evolution
+- prompt-only cache metadata 中的上述两项 A-Mem 字段。
+
+仍保留：
+
+- Step 1 JSONL、DirectStep1Memory、prompt-only memory/retriever cache。
+- LLMLingua 和两项 Prompt 消融配置。
+- QA individual_results、prompt、raw_context、metrics、summary 和检查点。
+- 完整成本统计 schema。被绕过的 Step 2/A-Mem stage 在成本统计中自然为零；未更名或删除成本字段，以遵守不修改成本统计的要求。
+- shared driver/pipeline 中 legacy_full 的两项 A-Mem 参数、缓存字段和函数定义，仅供其他旧入口使用；它们对本目标入口失效。
+
+六、可能影响
+
+- 目标入口的 memory 数量仅为 Step 1 direct memories，不再包含 Step 2 insights；QA 上下文和最终指标可能相应变化，这是本次精简的预期影响。
+- prompt-only 使用独立 final cache 名，不会复用原 legacy/Step 2 memory cache；首次运行需要重新保存 direct memory 和 retriever cache。
+- 旧的 Step 1 embedding、Step 2 和 final-notes artifacts 不会由 prompt-only 自动删除，也不会被读取。
+- 其他 legacy_full 调用方继续执行原 Step 1/Step 2/A-Mem 流程。
+
+七、验证结果
+
+1. python -m py_compile prestorage_pipeline.py hpc/memweave_qwen25_3b_locomo_driver.py test_ablation_independence.py：通过。
+2. bash -n hpc/memweave-qwen3-2507-locomo.sh：通过。
+3. premem 环境运行 python -m unittest test_cost_profiler.py test_ablation_independence.py：17 tests，全部通过。
+4. prompt-only 专项断言：
+   - Step 1 records 构建 1 次。
+   - Step 1 A-Mem add 0 次。
+   - Step 1 embedding save 0 次。
+   - Step 2 build 0 次。
+   - Step 2 embedding save 0 次。
+   - Step 2 A-Mem/direct add 0 次。
+   - DirectStep1Memory 与 retriever corpus 正常保存。
+   - prompt-only cache 可在 retriever cache 缺失时从 cached memories 恢复 direct retrieval documents。
+   - QA retrieval 在 legacy A-Mem flags 为 True 的测试条件下仍走 direct retrieval。
+5. 静态入口检查：目标 shell 只传 --memory-build-mode step1_prompt_only，不再包含 A-Mem CLI 参数或 Step 2/evolution 配置日志。
+
+未执行完整 GPU/vLLM LoCoMo 端到端作业，因为该验证需要启动模型服务并运行长时评测。现已完成 shell 语法、Python 语法、实际函数分支单元测试、缓存复用测试及成本统计回归测试；完整模型推理结果仍需通过后续 Slurm 作业确认。

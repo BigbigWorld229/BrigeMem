@@ -1,0 +1,155 @@
+MemWeave 可选成本统计实现交付说明
+生成日期：2026-07-14
+项目目录：/home/jwcao/xingzhuo/slm_memory_agent/code/MemWeave
+
+一、完成状态
+
+已完成可选成本统计。默认关闭；开启后旁路记录每次 LLM 调用、单个 LoCoMo 对话及全数据集的 token 和 latency。原 TokenUsageTracker、token_statistics 结果字段及以下终端日志完整保留：
+Token stats: summary=... update=... memory_build=... qa=... total_calls=...
+
+二、入口、调用链、原统计与 embedding
+
+- 规范评测入口：hpc/memweave_qwen25_3b_locomo_eval.py，调用 hpc/memweave_qwen25_3b_locomo_driver.py::main（第 693 行附近）。
+- 对话循环：driver 的 for sample_idx, sample in enumerate(samples)。每个 sample 是一个 LoCoMo 对话；以 LoCoMoSample.sample_id 作为统计 ID。
+- LLM 链路：业务模块 -> RobustLLMController.get_completion -> 后端 get_completion_with_usage（支持时）或 get_completion -> 原 TokenUsageTracker.record -> 原 response。
+- 新 profiler 只在统一 controller 外层落一条记录，避免同一次调用重复统计。
+- 原 Token stats：driver 的 get_token_statistics / aggregate_token_statistics 继续生成 summary、update、memory_build、qa、calls；原日志位于第 904 行附近。
+- A-Mem embedding/索引：memory_layer.py::SimpleEmbeddingRetriever（第 562 行附近）。
+- PREMem embedding：prestorage_pipeline.py::_LazyEmbedder（第 416 行附近），配置 all-MiniLM-L6-v2。
+- 缓存/索引：populate_agent_memory_from_prestorage 中调用 retriever.load、load_from_local_memory、retriever.save（第 1377-1443 行附近）。
+
+三、修改文件
+
+1. cost_profiler.py（新增）
+- 六阶段常量及固定顺序。
+- CostProfiler 通过 contextvars 传递 conversation/stage/session/turn/QA。
+- record_llm_call：input/output/total token、LLM latency、状态、错误。
+- API usage 优先；无 usage 时使用与 model_type 对应的 tokenizer；失败再用 approximate_regex，并记录 token_count_method。
+- stage_timer：记录非 LLM wall time，向量检索可作为 auxiliary latency。
+- snapshot：对话级/数据集级汇总。
+- save：summary JSON、calls JSONL、timings JSONL。
+- terminal_summary：六阶段终端摘要。
+
+2. memory_layer_robust.py（修改）
+- RobustLLMController、RobustAgenticMemorySystem 接收可选 cost_profiler。
+- 仅开启时用 time.perf_counter() 包围实际后端调用。
+- try/finally 保证失败也落记录；bare raise 保留原异常。
+- profiler 记录失败仅 warning，不改变原响应和业务异常处理。
+- 原 TokenUsageTracker 逻辑保留。
+- A-Mem 的 decision/strengthen/update 仍由 process_memory 原流程触发。
+
+3. prestorage_pipeline.py（修改）
+- PreStoragePipeline 接收 profiler 并传入 Step 1 controller。
+- Step 1 附加 session_id、turn_id、speaker。
+- Step 2 附加真实 session_id 和 cluster pair 标识。
+- Step 1/Step 2 后的 agent.add_memory 分别标为两个独立 A-Mem 演化阶段；add_memory 内实际发生的 decision/strengthen/update 自动归入当前阶段。
+- 只记录实际调用；缓存命中时不会虚构 PREMem LLM calls。
+
+4. hpc/memweave_qwen25_3b_locomo_driver.py（修改）
+- --enable-cost-profiling：store_true，默认 False。
+- --cost-profile-output：可选 summary JSON 路径。
+- sample 开始/结束记录对话端到端时间。
+- Table1QwenAgent 传递 profiler。
+- answer_question 分离 query rewrite、纯向量检索和 final answer。
+- 仅开启时给原结果 payload 增加 cost_profiling；原字段不变。
+- 原 Token stats 日志保留，之后额外输出 Cost profiling。
+
+5. test_cost_profiler.py（新增）
+- 5 个无网络、无模型下载 unittest。
+
+6. COST_PROFILING_IMPLEMENTATION_REPORT.txt（新增）
+- 本说明。
+
+未修改 prompt、模型参数、记忆生成/演化规则、检索结果、QA prompt、数据处理顺序、既有 CLI 参数、既有输出文件或原 Token stats 字段；未添加第三方依赖；未修改需求范围之外的代码。
+
+四、六阶段映射
+
+1. premem_step1_information_extraction
+- PreStoragePipeline._build_step1_records（第 784 行附近）及 _upgrade_cached_step1_rows。
+- _extract_step1_metadata（第 616 行附近）。
+- operation=prestorage_step1_metadata。
+- 输出 keywords、context、summary、tags，并构造 Step1NoteRecord。
+- 标识 session_id、turn_id、speaker。
+- 完整缓存命中时 calls 可为 0。
+
+2. amem_evolution_after_step1
+- populate_agent_memory_from_prestorage（第 1334 行附近）中每个 Step1NoteRecord 的 agent.add_memory。
+- 下游 RobustAgenticMemorySystem.add_memory -> process_memory（memory_layer_robust.py 第 862 行附近）。
+- operations：memory_evolution_decision、memory_evolution_strengthen、memory_evolution_update_neighbor。
+- 只统计实际发生的条件调用。
+
+3. premem_step2_reasoning
+- PreStoragePipeline._build_step2_records（第 951 行附近）。
+- operation=prestorage_step2_reasoning（第 1095 行附近）。
+- 标识：真实 session_id、current_cluster_id、remain_session_index、remain_cluster_id。
+- 完整缓存命中时 calls 可为 0。
+
+4. amem_evolution_after_step2
+- add_step2_records_to_agent（第 1287 行附近）中每个 Step2InsightRecord 的 agent.add_memory。
+- 下游及 operation 同阶段 2，但独立累计。
+
+5. query_rewrite
+- Table1QwenAgent.answer_question -> generate_query_llm（driver 第 345、355 行附近）。
+- operation=retrieval_keyword_query。
+- 输入原 question，输出关键词查询；标识 qa_id、category。
+
+6. retrieval_and_answer_generation
+- answer_question -> retrieve_memory（第 326 行附近）：timing operation=vector_retrieval_and_link_expansion；仅计 auxiliary latency，不计 LLM token。
+- 最终回答：operation=qa_answer_generation（第 446 行附近）；标识 qa_id、category。
+- retrieval_relevance_filter 保留 fallback 映射，但规范 driver 当前 retrieve_memory 路径未调用 retrieve_memory_llm，因此不会产生虚构记录。
+
+实际顺序：
+Step 1 -> Step1 A-Mem 演化 -> Step 2 -> Step2 A-Mem 演化 -> 对每个 QA 执行 query rewrite -> vector retrieval -> answer generation。
+
+五、输出及字段
+
+默认 profile 路径：与 --output 同目录的 <result_stem>_cost_profile.json。
+同时生成：
+- <profile_stem>.calls.jsonl
+- <profile_stem>.timings.jsonl
+
+调用级字段：
+call_id, conversation_id, stage, operation, session_id, turn_id, qa_id, item_type, item_metadata, model, input_tokens, output_tokens, total_tokens, latency_seconds, call_count=1, status, error_type, error_message, token_count_method。
+
+timing 字段：
+conversation_id, stage, operation, latency_seconds, status, error_type, contributes_to_stage_latency, metadata。
+
+每对话/每阶段字段：
+input_tokens, output_tokens, total_tokens, llm_latency_seconds, auxiliary_latency_seconds, total_latency_seconds, stage_wall_seconds, llm_calls, successful_calls, failed_calls。
+对话总计另含 end_to_end_seconds。
+
+数据集级字段：
+以上阶段与总计字段，另含 conversation_count、end_to_end_seconds。顶层含 stage_order、call_count、timing_event_count、model、enabled。
+
+六、使用
+
+默认关闭，保持原行为：
+python3 hpc/memweave_qwen25_3b_locomo_eval.py [原有参数]
+
+开启：
+python3 hpc/memweave_qwen25_3b_locomo_eval.py [原有参数] --enable-cost-profiling
+
+指定输出：
+python3 hpc/memweave_qwen25_3b_locomo_eval.py [原有参数] --enable-cost-profiling --cost-profile-output hpc/results/my_cost_profile.json
+
+七、测试
+
+静态检查：
+python3 -m py_compile cost_profiler.py memory_layer_robust.py prestorage_pipeline.py hpc/memweave_qwen25_3b_locomo_driver.py test_cost_profiler.py
+结果：通过，exit code 0。
+
+最小单测：
+python3 -m unittest -v test_cost_profiler.py
+结果：5 tests，全部 OK（2026-07-14 本次复测 0.058s）。
+
+已确认：
+- 关闭时 response 不变、profiler 无 call，原 tracker 仍按 API usage 记录 14 tokens。
+- 开启时具备调用级、阶段级、对话级、数据集级统计。
+- API usage 优先，tokenizer fallback 可用。
+- vector latency 与 LLM token 分离。
+- 失败记录 status=failed，原 RuntimeError 继续抛出。
+- 同一 controller 调用只有一条记录。
+- 三类统计文件成功保存。
+- 原 Token stats 输出仍存在。
+
+完整 LoCoMo 端到端未在本次最小测试中重跑，以免占用真实模型/HPC 长任务。当前环境加载完整 CLI 时，nltk 的既有依赖缺少 regex 包（ModuleNotFoundError: regex）；该问题不是 profiling 引入。静态检查和隔离单测均已通过。
