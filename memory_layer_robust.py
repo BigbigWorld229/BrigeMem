@@ -26,10 +26,10 @@ DEFAULT_SYSTEM_MESSAGE = (
     "Follow the format specified in the prompt exactly. Do not add extra commentary."
 )
 QWEN3_SYSTEM_MESSAGE = (
-    # "Follow the format specified in the prompt exactly. Do not add extra commentary. "
-    # "Keep the output concise and rigorous, with a maximum length of 45,000 characters."
-    "You are a conservative dialogue memory representation generator for long-term retrieval."
-    "Return only one valid JSON object matching the exact schema requested by the user. Do not output explanations, reasoning, markdown, or additional fields."
+    "Follow the format specified in the prompt exactly. Do not add extra commentary. "
+    "Keep the output concise and rigorous."
+    # "You are a conservative dialogue memory representation generator for long-term retrieval."
+    # "Return only one valid JSON object matching the exact schema requested by the user. Do not output explanations, reasoning, markdown, or additional fields."
 )
 
 
@@ -37,12 +37,15 @@ def resolve_system_message(model_type: str) -> str:
     """Select the system message without changing non-Qwen3 behavior."""
     if str(model_type or "").strip().lower() == "qwen3":
         return QWEN3_SYSTEM_MESSAGE
+    if str(model_type or "").strip().lower() == "qwen3_8b":
+        return QWEN3_SYSTEM_MESSAGE
     return DEFAULT_SYSTEM_MESSAGE
 
 
 QWEN_TOKENIZER_MODEL_NAMES = {
     "qwen25": "Qwen/Qwen2.5-3B-Instruct",
     "qwen3": "Qwen/Qwen3-4B-Instruct-2507",
+    "qwen3_8b": "/home/share/models/Qwen3-8B",
 }
 
 QWEN_LOCAL_TOKENIZER_FALLBACKS = {
@@ -289,6 +292,7 @@ class RobustVLLMController(RobustBaseLLMController):
         self.base_url = f"{vllm_host}:{vllm_port}"
         self._set_model_type(model_type)
         self.chat_template = resolve_qwen_chat_template(model_type)
+        self.disable_thinking = str(model_type or "").strip().lower() == "qwen3_8b"
         print(
             "[DEBUG_QWEN_COMPARE] VLLM_CONTROLLER_INIT "
             f"model={self.model} tokenizer_name={self.model} base_url={self.base_url} "
@@ -313,6 +317,8 @@ class RobustVLLMController(RobustBaseLLMController):
         }
         if self.chat_template is not None:
             payload["chat_template"] = self.chat_template
+        if self.disable_thinking:
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
         print(
             "[DEBUG_QWEN_COMPARE] LLM_HTTP_BEFORE "
             f"method=get_completion model={self.model} tokenizer_name={self.model} "
@@ -358,6 +364,8 @@ class RobustVLLMController(RobustBaseLLMController):
         }
         if self.chat_template is not None:
             payload["chat_template"] = self.chat_template
+        if self.disable_thinking:
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
         print(
             "[DEBUG_QWEN_COMPARE] LLM_HTTP_BEFORE "
             f"method=get_completion_with_usage model={self.model} tokenizer_name={self.model} "
